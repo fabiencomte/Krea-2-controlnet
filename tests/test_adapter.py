@@ -83,6 +83,33 @@ def test_projection_uses_official_full_weight_and_bias(monkeypatch):
     torch.testing.assert_close(projection(image, control), expected)
 
 
+def test_projection_casts_cpu_weights_to_the_live_low_vram_dtype(monkeypatch):
+    casts = []
+    backend_mm = types.ModuleType("backend.memory_management")
+
+    def cast_to(value, device, dtype):
+        casts.append((value.device.type, device.type, dtype))
+        return value.to(device=device, dtype=dtype)
+
+    backend_mm.cast_to = cast_to
+    monkeypatch.setitem(sys.modules, "backend.memory_management", backend_mm)
+    projection = ControlProjection(
+        torch.ones(3, 8, dtype=torch.float32),
+        torch.zeros(3, dtype=torch.float32),
+        image_features=4,
+    )
+    image = torch.ones(1, 2, 4, dtype=torch.float64)
+    control = torch.ones(1, 2, 4, dtype=torch.float32)
+
+    result = projection(image, control)
+
+    assert result.dtype == torch.float64
+    assert casts == [
+        ("cpu", "cpu", torch.float64),
+        ("cpu", "cpu", torch.float64),
+    ]
+
+
 def test_control_tokens_resize_repeat_and_patchify():
     latent = torch.arange(16.0).reshape(1, 1, 4, 4)
     sample = torch.zeros(2, 1, 1, 4, 4)
@@ -172,6 +199,7 @@ def test_apply_control_keeps_first_registered_and_avoids_object_patch(monkeypatc
 
         def add_patches(self, patches, **_kwargs):
             self.patches = patches
+            self.patch_kwargs = _kwargs
             return list(patches)
 
         def set_model_unet_function_wrapper(self, wrapper):
@@ -198,6 +226,8 @@ def test_apply_control_keeps_first_registered_and_avoids_object_patch(monkeypatc
     assert controlled.object_patches == {}
     assert "diffusion_model.first.weight" in dict(model.named_parameters())
     assert controlled.model.diffusion_model.first is diffusion.first
+    assert controlled.patch_kwargs["strength_patch"] == 1.0
+    assert controlled.patch_kwargs["strength_model"] == 1.0
 
 
 def test_download_is_revision_pinned_and_sha_verified(tmp_path, monkeypatch):
@@ -229,6 +259,57 @@ def test_download_rejects_wrong_sha(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="Invalid depth-control-lora.safetensors SHA-256"):
         adapter.download_control_model(tmp_path)
+
+
+def test_ordinary_model_load_rejects_wrong_sha(tmp_path, monkeypatch):
+    checkpoint = tmp_path / adapter.CONTROL_MODEL_FILENAME
+    checkpoint.write_bytes(b"same-shaped but untrusted control model")
+    backend_utils = types.ModuleType("backend.utils")
+    backend_utils.load_torch_file = lambda *_args, **_kwargs: {"loaded": True}
+    monkeypatch.setitem(sys.modules, "backend.utils", backend_utils)
+
+    with pytest.raises(ValueError, match="Invalid depth-control-lora.safetensors SHA-256"):
+        adapter.load_control_state_dict(checkpoint)
+
+
+def test_download_uses_verified_existing_file_without_network(tmp_path, monkeypatch):
+    payload = b"already verified"
+    checkpoint = tmp_path / "ControlNet" / "Krea2" / adapter.CONTROL_MODEL_FILENAME
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(payload)
+    monkeypatch.setattr(adapter, "CONTROL_MODEL_SHA256", hashlib.sha256(payload).hexdigest())
+    backend_utils = types.ModuleType("backend.utils")
+    backend_utils.load_torch_file = lambda *_args, **_kwargs: {"loaded": True}
+    monkeypatch.setitem(sys.modules, "backend.utils", backend_utils)
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = lambda **_kwargs: pytest.fail("network was used")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    assert adapter.download_control_model(tmp_path) == checkpoint.resolve()
+
+
+def test_download_replaces_a_corrupt_existing_file(tmp_path, monkeypatch):
+    payload = b"fresh verified model"
+    checkpoint = tmp_path / "ControlNet" / "Krea2" / adapter.CONTROL_MODEL_FILENAME
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"corrupt existing model")
+    monkeypatch.setattr(adapter, "CONTROL_MODEL_SHA256", hashlib.sha256(payload).hexdigest())
+    backend_utils = types.ModuleType("backend.utils")
+    backend_utils.load_torch_file = lambda *_args, **_kwargs: {"loaded": True}
+    monkeypatch.setitem(sys.modules, "backend.utils", backend_utils)
+    calls = {}
+    fake_hub = types.ModuleType("huggingface_hub")
+
+    def fake_download(**kwargs):
+        calls.update(kwargs)
+        checkpoint.write_bytes(payload)
+        return str(checkpoint)
+
+    fake_hub.hf_hub_download = fake_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    assert adapter.download_control_model(tmp_path) == checkpoint.resolve()
+    assert calls["force_download"] is True
 
 
 def test_failure_guard_prevents_silent_uncontrolled_sampling():

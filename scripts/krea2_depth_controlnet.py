@@ -14,6 +14,12 @@ from forge_krea2_depth.adapter import (
     install_failure_guard,
     load_control_state_dict,
 )
+from forge_krea2_depth.controls import (
+    require_checkbox,
+    require_preprocessor,
+    require_resolution,
+    require_strength,
+)
 from forge_krea2_depth.images import create_depth_map, generation_dimensions
 from modules import paths, scripts
 from modules.ui_components import InputAccordion
@@ -92,7 +98,11 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
                 )
             model_status = gr.Markdown(
                 f"Model: `{model_path}` — "
-                + ("ready" if model_path.is_file() else "missing")
+                + (
+                    "present — verified automatically before loading"
+                    if model_path.is_file()
+                    else "missing"
+                )
             )
         model_status.do_not_save_to_config = True
         preview_button.do_not_save_to_config = True
@@ -126,11 +136,17 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
         **kwargs,
     ):
         del kwargs
-        if not enabled:
-            return
-        if float(strength) == 0.0:
-            return
         try:
+            enabled = require_checkbox(enabled, "enabled")
+            if not enabled:
+                return
+            strength = require_strength(strength)
+            if strength == 0.0:
+                return
+            preprocessor = require_preprocessor(preprocessor)
+            resolution = require_resolution(resolution)
+            invert = require_checkbox(invert, "invert")
+
             if type(p.sd_model).__name__ != "Krea2":
                 raise TypeError(
                     "Krea 2 Depth ControlNet-LoRA requires a Krea 2 checkpoint."
@@ -139,11 +155,11 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
             width, height = generation_dimensions(p)
             depth = create_depth_map(
                 control_image,
-                str(preprocessor),
-                int(resolution),
+                preprocessor,
+                resolution,
                 width,
                 height,
-                bool(invert),
+                invert,
             )
             image = torch.from_numpy(depth.copy()).float().div_(255.0).unsqueeze(0)
             _, latent = p.sd_model.encode_vision(image)
@@ -156,13 +172,13 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
                 p.sd_model.forge_objects.unet,
                 latent,
                 state_dict,
-                float(strength),
+                strength,
             )
             p.extra_generation_params.update(
                 {
                     "Krea 2 Depth Control": os.path.basename(model_path),
-                    "Krea 2 Depth Preprocessor": str(preprocessor),
-                    "Krea 2 Depth Strength": float(strength),
+                    "Krea 2 Depth Preprocessor": preprocessor,
+                    "Krea 2 Depth Strength": strength,
                 }
             )
         except Exception as exc:

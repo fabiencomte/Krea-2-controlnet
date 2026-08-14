@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from forge_krea2_depth.images import (  # noqa: E402
+    create_depth_map,
     fit_control_map,
     generation_dimensions,
     normalize_image,
@@ -72,3 +74,56 @@ def test_first_pass_ignores_future_hires_dimensions():
         hr_upscale_to_y = 512
 
     assert generation_dimensions(Process()) == (512, 512)
+
+
+def test_none_preprocessor_uses_supplied_depth_map(monkeypatch):
+    fake_shared = types.ModuleType("modules_forge.shared")
+    fake_shared.supported_preprocessors = {
+        "depth_anything_v2": lambda **_kwargs: pytest.fail("preprocessor was called")
+    }
+    monkeypatch.setitem(sys.modules, "modules_forge.shared", fake_shared)
+    source = np.full((4, 8, 3), 31, dtype=np.uint8)
+
+    result = create_depth_map(
+        source, "None (already a depth map)", 768, 8, 4, False
+    )
+
+    assert result.shape == (4, 8, 3)
+    assert np.all(result == 31)
+
+
+def test_depth_preprocessor_receives_resolution_and_can_invert(monkeypatch):
+    calls = []
+
+    def preprocessor(**kwargs):
+        calls.append(kwargs)
+        return np.full((2, 4, 3), 10, dtype=np.uint8)
+
+    fake_shared = types.ModuleType("modules_forge.shared")
+    fake_shared.supported_preprocessors = {"depth_anything_v2": preprocessor}
+    monkeypatch.setitem(sys.modules, "modules_forge.shared", fake_shared)
+
+    result = create_depth_map(
+        np.zeros((3, 5, 3), dtype=np.uint8),
+        "depth_anything_v2",
+        1024,
+        4,
+        2,
+        True,
+    )
+
+    assert calls[0]["resolution"] == 1024
+    assert calls[0]["slider_1"] is None
+    assert calls[0]["slider_2"] is None
+    assert np.all(result == 245)
+
+
+def test_unknown_preprocessor_is_rejected(monkeypatch):
+    fake_shared = types.ModuleType("modules_forge.shared")
+    fake_shared.supported_preprocessors = {}
+    monkeypatch.setitem(sys.modules, "modules_forge.shared", fake_shared)
+
+    with pytest.raises(ValueError, match="preprocessor is unavailable"):
+        create_depth_map(
+            np.zeros((2, 2, 3), dtype=np.uint8), "missing", 768, 2, 2, False
+        )

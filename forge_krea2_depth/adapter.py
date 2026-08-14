@@ -47,8 +47,19 @@ def _sha256(path: Path) -> str:
 
 
 @lru_cache(maxsize=1)
-def _load_cached(path: str, modified_ns: int) -> Mapping[str, torch.Tensor]:
-    del modified_ns
+def _verify_cached(path: str, modified_ns: int, size: int) -> None:
+    del modified_ns, size
+    digest = _sha256(Path(path))
+    if digest != CONTROL_MODEL_SHA256:
+        raise ValueError(
+            f"Invalid {CONTROL_MODEL_FILENAME} SHA-256: {digest}; "
+            f"expected {CONTROL_MODEL_SHA256}."
+        )
+
+
+@lru_cache(maxsize=1)
+def _load_cached(path: str, modified_ns: int, size: int) -> Mapping[str, torch.Tensor]:
+    del modified_ns, size
     from backend.utils import load_torch_file
 
     return load_torch_file(path, safe_load=True)
@@ -62,7 +73,8 @@ def load_control_state_dict(path: str | os.PathLike[str]) -> Mapping[str, torch.
             f"Download {CONTROL_MODEL_REPO}/{CONTROL_MODEL_FILENAME}."
         )
     stat = resolved.stat()
-    return _load_cached(str(resolved), stat.st_mtime_ns)
+    _verify_cached(str(resolved), stat.st_mtime_ns, stat.st_size)
+    return _load_cached(str(resolved), stat.st_mtime_ns, stat.st_size)
 
 
 def download_control_model(models_path: str | os.PathLike[str]) -> Path:
@@ -70,6 +82,14 @@ def download_control_model(models_path: str | os.PathLike[str]) -> Path:
 
     destination = control_model_path(models_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        try:
+            load_control_state_dict(destination)
+        except ValueError:
+            pass
+        else:
+            return destination.resolve()
+
     from huggingface_hub import hf_hub_download
 
     downloaded = hf_hub_download(
@@ -77,14 +97,10 @@ def download_control_model(models_path: str | os.PathLike[str]) -> Path:
         filename=CONTROL_MODEL_FILENAME,
         revision=CONTROL_MODEL_REVISION,
         local_dir=str(destination.parent),
+        force_download=destination.is_file(),
     )
     result = Path(downloaded).resolve()
-    digest = _sha256(result)
-    if digest != CONTROL_MODEL_SHA256:
-        raise ValueError(
-            f"Invalid {CONTROL_MODEL_FILENAME} SHA-256: {digest}; "
-            f"expected {CONTROL_MODEL_SHA256}."
-        )
+    _verify_cached.cache_clear()
     _load_cached.cache_clear()
     load_control_state_dict(result)
     return result

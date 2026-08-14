@@ -62,18 +62,23 @@ uses the opposite convention.
 - Generate, Skip and Interrupt remain entirely owned by Forge. The temporary
   hook is always removed in `finally`, including after an interruption.
 - The WebUI API accepts the same base64 image format as `/sdapi/v1/txt2img`.
+  Its booleans, resolution and strength are validated strictly, so an ambiguous
+  or out-of-range request fails closed instead of silently changing meaning.
 - The model download is pinned to the official file revision and checked against
   SHA-256 `fb80547ed79b47c1e3fea7bb9d36297e3917b2115fab6700ca1501350f9f483c`.
+  Normal generation verifies the same hash before loading, while the download
+  button reuses a valid local file and replaces a corrupt one.
 - Hires fix rebuilds the control map at the second pass's real dimensions, so a
   changed aspect ratio is not first cropped square and then stretched.
 
 ### Verified cases
 
-- 19 automated tests: official checkpoint layout, completeness and tensor
+- 41 automated tests: official checkpoint layout, completeness and tensor
   shapes, full projection weight/bias, CFG batch repetition, non-square and
   changed-ratio Hires resize, image/API contracts, previous-wrapper multi-call
-  composition, one-shot Krea Edit behavior, pinned download integrity, and
-  cleanup after an interrupt-like exception;
+  composition, one-shot Krea Edit behavior, low-VRAM dtype casts, strict API
+  controls, pinned local/download integrity, and cleanup after an interrupt-like
+  exception;
 - real Krea 2 generation at 128×128 and an 8-step 512×512 generation using
   Depth Anything V2;
 - deterministic enabled/disabled comparison proving that control changes the
@@ -104,6 +109,9 @@ arguments:
   }
 }
 ```
+
+For API calls, keep the two checkbox values as JSON booleans, the resolution as
+an integer from 256 to 2048, and the strength as a finite number from 0 to 2.
 
 The upstream repository currently contains no code license file. This fork does
 not invent or change one. Model weights remain subject to the
