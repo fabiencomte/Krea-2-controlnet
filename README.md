@@ -1,5 +1,97 @@
 
-# Krea-2 Depth ControlNet-LoRA
+# Krea-2 Depth ControlNet-LoRA — Forge Classic 2.28.1 fork
+
+> [!NOTE]
+> The original project is a standalone inference and training toolkit, not a
+> Stable Diffusion WebUI extension. I thought the depth-control tool was too
+> useful to leave outside Forge, so I made this integration for
+> **sd-webui-forge-classic 2.28.1**, with a little help from AI. I hope it is
+> useful to other people in the community too.
+
+This fork adds a native, always-visible Forge panel while keeping the original
+standalone scripts and training code available. It has been tested on Windows,
+Python 3.13, Gradio 4.40 and a Krea 2 checkpoint using the Qwen/Krea image VAE.
+
+## Install in Forge Classic 2.28.1
+
+Clone this fork into Forge's `extensions` directory, then restart Forge:
+
+```bash
+git clone -b forge-classic-2.28.1 \
+  https://github.com/fabiencomte/Krea-2-controlnet.git
+```
+
+Open **Krea 2 Depth ControlNet-LoRA** below txt2img or img2img. Click
+**Download / verify model (862 MB)** once, add an image, keep
+`depth_anything_v2` selected, and enable the accordion before Generate. The
+official checkpoint is stored outside Git at:
+
+```text
+models/ControlNet/Krea2/depth-control-lora.safetensors
+```
+
+The Depth Anything V2 preprocessor downloads its own model through Forge on
+first use. You can also choose **None (already a depth map)** to supply a map
+directly. White means near by default; use **Invert depth map** when the input
+uses the opposite convention.
+
+### Why this Forge integration is safe
+
+- It clones Forge's current `UnetPatcher` for each sampling pass. The base model
+  and Forge core files are not changed.
+- It preserves the active Krea input projection, including quantised checkpoints
+  and regular LoRAs, and adds only the learned depth half.
+- All 224 expected LoRA pairs are shape-checked before sampling. A partial or
+  incompatible checkpoint is rejected instead of being applied silently.
+- A control error installs a fail-closed sampling guard. Forge cannot quietly
+  continue with an uncontrolled image.
+- Generate, Skip and Interrupt remain entirely owned by Forge. Temporary depth
+  tokens are restored in `finally`, including after an interruption.
+- The WebUI API accepts the same base64 image format as `/sdapi/v1/txt2img`.
+
+### Verified cases
+
+- 14 automated tests: official checkpoint layout, completeness and tensor
+  shapes, projection composition, CFG batch repetition, non-square resize, image/API contracts,
+  wrapper composition, and cleanup after an interrupt-like exception;
+- real Krea 2 generation at 128×128 and an 8-step 512×512 generation using
+  Depth Anything V2;
+- deterministic enabled/disabled comparison proving that control changes the
+  denoising result;
+- Skip during batch 1/2, continuation and successful batch 2/2;
+- Interrupt during sampling followed by a clean controlled generation;
+- Ruff, `compileall`, `git diff --check`, UI load and API infotext metadata.
+
+Run the tests from this repository:
+
+```bash
+python -m pytest -q tests
+python -m ruff check forge_krea2_depth scripts tests
+python -m compileall -q forge_krea2_depth scripts tests
+```
+
+### API example
+
+Use the always-on script name `Krea 2 Depth ControlNet-LoRA` and these six
+arguments:
+
+```json
+{
+  "alwayson_scripts": {
+    "Krea 2 Depth ControlNet-LoRA": {
+      "args": [true, "data:image/png;base64,...", "depth_anything_v2", 768, false, 1.0]
+    }
+  }
+}
+```
+
+The upstream repository currently contains no code license file. This fork does
+not invent or change one. Model weights remain subject to the
+[Krea 2 community license](https://www.krea.ai/krea-2-licensing).
+
+---
+
+## Original standalone project
 
 Depth-conditioned generation for [Krea-2](https://github.com/krea-ai/krea-2). Give it any image and a prompt — it extracts the depth map with Depth-Anything-V2 and generates a new image with the **same 3D structure** and composition, but whatever content and style you ask for.
 
