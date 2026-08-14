@@ -48,6 +48,17 @@ def fit_control_map(image: np.ndarray, width: int, height: int) -> np.ndarray:
     return np.asarray(fitted)
 
 
+def generation_dimensions(process: Any) -> tuple[int, int]:
+    """Return the pixel dimensions of the sampling pass currently being built."""
+
+    if bool(getattr(process, "is_hr_pass", False)):
+        width = int(getattr(process, "hr_upscale_to_x", 0) or 0)
+        height = int(getattr(process, "hr_upscale_to_y", 0) or 0)
+        if width > 0 and height > 0:
+            return width, height
+    return int(process.width), int(process.height)
+
+
 def create_depth_map(
     image: Any,
     preprocessor_name: str,

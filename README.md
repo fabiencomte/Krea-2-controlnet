@@ -39,21 +39,33 @@ uses the opposite convention.
 
 - It clones Forge's current `UnetPatcher` for each sampling pass. The base model
   and Forge core files are not changed.
-- It preserves the active Krea input projection, including quantised checkpoints
-  and regular LoRAs, and adds only the learned depth half.
+- It keeps Forge's real Krea input layer registered, so cold-load and low-VRAM
+  moves remain under Forge's control. The depth checkpoint intentionally
+  replaces that layer's output for the noisy image tokens, matching its official
+  inference code; a separate LoRA aimed specifically at `first.weight` therefore
+  does not combine with depth control on that one call.
+- During each denoising call, a temporary one-shot hook applies the checkpoint's
+  complete trained input projection (`first.weight` and `first.bias`) to the
+  noisy image tokens only. Krea Edit reference tokens keep their normal path.
 - All 224 expected LoRA pairs are shape-checked before sampling. A partial or
   incompatible checkpoint is rejected instead of being applied silently.
 - A control error installs a fail-closed sampling guard. Forge cannot quietly
   continue with an uncontrolled image.
-- Generate, Skip and Interrupt remain entirely owned by Forge. Temporary depth
-  tokens are restored in `finally`, including after an interruption.
+- Generate, Skip and Interrupt remain entirely owned by Forge. The temporary
+  hook is always removed in `finally`, including after an interruption.
 - The WebUI API accepts the same base64 image format as `/sdapi/v1/txt2img`.
+- The model download is pinned to the official file revision and checked against
+  SHA-256 `fb80547ed79b47c1e3fea7bb9d36297e3917b2115fab6700ca1501350f9f483c`.
+- Hires fix rebuilds the control map at the second pass's real dimensions, so a
+  changed aspect ratio is not first cropped square and then stretched.
 
 ### Verified cases
 
-- 14 automated tests: official checkpoint layout, completeness and tensor
-  shapes, projection composition, CFG batch repetition, non-square resize, image/API contracts,
-  wrapper composition, and cleanup after an interrupt-like exception;
+- 19 automated tests: official checkpoint layout, completeness and tensor
+  shapes, full projection weight/bias, CFG batch repetition, non-square and
+  changed-ratio Hires resize, image/API contracts, previous-wrapper multi-call
+  composition, one-shot Krea Edit behavior, pinned download integrity, and
+  cleanup after an interrupt-like exception;
 - real Krea 2 generation at 128×128 and an 8-step 512×512 generation using
   Depth Anything V2;
 - deterministic enabled/disabled comparison proving that control changes the

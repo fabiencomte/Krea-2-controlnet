@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ sys.modules.setdefault(
     "modules_forge.packages.comfy.weight_adapter.lora", fake_lora
 )
 
+import forge_krea2_depth.adapter as adapter  # noqa: E402
 from forge_krea2_depth.adapter import (  # noqa: E402
     EXPECTED_BLOCKS,
     LORA_TARGETS,
@@ -36,7 +38,10 @@ from forge_krea2_depth.adapter import (  # noqa: E402
 
 
 def make_state(features=4, rank=2):
-    state = {"first.weight": torch.zeros(6, features * 2)}
+    state = {
+        "first.weight": torch.zeros(6, features * 2),
+        "first.bias": torch.zeros(6),
+    }
     model = {}
     for block in range(EXPECTED_BLOCKS):
         for target in LORA_TARGETS:
@@ -64,18 +69,18 @@ def test_rejects_partial_checkpoint_instead_of_silently_degrading():
         build_lora_patches(state, model)
 
 
-def test_projection_preserves_base_and_adds_depth_branch(monkeypatch):
+def test_projection_uses_official_full_weight_and_bias(monkeypatch):
     backend_mm = types.ModuleType("backend.memory_management")
     backend_mm.cast_to = lambda value, device, dtype: value.to(device=device, dtype=dtype)
     monkeypatch.setitem(sys.modules, "backend.memory_management", backend_mm)
-    base = nn.Linear(4, 3)
-    control_weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-    projection = ControlProjection(base, control_weight)
+    weight = torch.arange(24, dtype=torch.float32).reshape(3, 8)
+    bias = torch.tensor([1.0, 2.0, 3.0])
+    projection = ControlProjection(weight, bias, image_features=4)
     image = torch.randn(2, 5, 4)
     control = torch.randn(1, 5, 4)
-    projection.control_tokens = control
-    expected = base(image) + torch.nn.functional.linear(control.repeat(2, 1, 1), control_weight)
-    torch.testing.assert_close(projection(image), expected)
+    combined = torch.cat((image, control.repeat(2, 1, 1)), dim=-1)
+    expected = torch.nn.functional.linear(combined, weight, bias)
+    torch.testing.assert_close(projection(image, control), expected)
 
 
 def test_control_tokens_resize_repeat_and_patchify():
@@ -94,45 +99,136 @@ def test_control_tokens_reject_wrong_vae_channels():
         make_control_tokens(latent, sample, patch_size=2, expected_features=4)
 
 
-def test_wrapper_restores_tokens_and_composes_existing_wrapper():
-    projection = types.SimpleNamespace(control_tokens="old", in_features=4)
+def _hook_fixture(monkeypatch):
+    backend_mm = types.ModuleType("backend.memory_management")
+    backend_mm.cast_to = lambda value, device, dtype: value.to(device=device, dtype=dtype)
+    monkeypatch.setitem(sys.modules, "backend.memory_management", backend_mm)
+    first = nn.Linear(4, 3)
+    weight = torch.zeros(3, 8)
+    weight[:, 4:] = 1.0
+    projection = ControlProjection(weight, torch.zeros(3), image_features=4)
+    call = {
+        "input": torch.zeros(1, 1, 1, 4, 4),
+        "timestep": torch.tensor([1.0]),
+        "c": {},
+    }
+    return first, projection, call
+
+
+def test_wrapper_composes_previous_wrapper_and_is_fresh_for_each_call(monkeypatch):
+    first, projection, call = _hook_fixture(monkeypatch)
     seen = []
 
     def previous(model_function, call):
-        seen.append(projection.control_tokens.shape)
-        return model_function(call["input"], call["timestep"], **call["c"]) + 1
+        seen.append(model_function(call["input"], call["timestep"], **call["c"]))
+        seen.append(model_function(call["input"], call["timestep"], **call["c"]))
+        return "composed"
+
+    image = torch.ones(1, 4, 4)
+    reference = torch.full((1, 4, 4), 2.0)
+
+    def model_function(*_args, **_kwargs):
+        return first(image), first(reference)
 
     wrapper = _compose_control_wrapper(
-        projection, torch.zeros(1, 1, 4, 4), 2, previous
+        first, projection, torch.ones(1, 1, 4, 4), 2, previous
     )
-    call = {
-        "input": torch.zeros(1, 1, 1, 4, 4),
-        "timestep": torch.tensor([1.0]),
-        "c": {},
-    }
-    result = wrapper(lambda x, t, **c: torch.tensor(4), call)
-    assert result.item() == 5
-    assert seen == [(1, 4, 4)]
-    assert projection.control_tokens == "old"
+    assert wrapper(model_function, call) == "composed"
+    assert len(seen) == 2
+    for controlled_image, untouched_reference in seen:
+        torch.testing.assert_close(controlled_image, torch.full((1, 4, 3), 4.0))
+        torch.testing.assert_close(untouched_reference, first(reference))
+    assert len(first._forward_hooks) == 0
 
 
-def test_wrapper_restores_tokens_after_interrupt_like_exception():
-    projection = types.SimpleNamespace(control_tokens=None, in_features=4)
+def test_wrapper_removes_hook_after_interrupt_like_exception(monkeypatch):
+    first, projection, call = _hook_fixture(monkeypatch)
     wrapper = _compose_control_wrapper(
-        projection, torch.zeros(1, 1, 4, 4), 2, None
+        first, projection, torch.zeros(1, 1, 4, 4), 2, None
     )
-    call = {
-        "input": torch.zeros(1, 1, 1, 4, 4),
-        "timestep": torch.tensor([1.0]),
-        "c": {},
-    }
 
     def interrupted(*args, **kwargs):
+        first(torch.ones(1, 4, 4))
         raise RuntimeError("interrupted")
 
     with pytest.raises(RuntimeError, match="interrupted"):
         wrapper(interrupted, call)
-    assert projection.control_tokens is None
+    assert len(first._forward_hooks) == 0
+
+
+def test_apply_control_keeps_first_registered_and_avoids_object_patch(monkeypatch):
+    class FakeUnet:
+        def __init__(self, model):
+            self.model = model
+            self.model_options = {}
+            self.object_patches = {}
+
+        def clone(self):
+            return FakeUnet(self.model)
+
+        def get_model_object(self, name):
+            assert name == "diffusion_model.first"
+            return self.model.diffusion_model.first
+
+        def add_patches(self, patches, **_kwargs):
+            self.patches = patches
+            return list(patches)
+
+        def set_model_unet_function_wrapper(self, wrapper):
+            self.wrapper = wrapper
+
+    diffusion = nn.Module()
+    diffusion.first = nn.Linear(4, 6)
+    diffusion.blocks = nn.ModuleList()
+    diffusion.patch = 2
+    diffusion.channels = 1
+    model = nn.Module()
+    model.diffusion_model = diffusion
+    unet = FakeUnet(model)
+    state = {
+        "first.weight": torch.zeros(6, 8),
+        "first.bias": torch.zeros(6),
+    }
+    monkeypatch.setattr(adapter, "build_lora_patches", lambda *_: {"layer": object()})
+
+    controlled = adapter.apply_depth_control(
+        unet, torch.zeros(1, 1, 4, 4), state, 1.0
+    )
+
+    assert controlled.object_patches == {}
+    assert "diffusion_model.first.weight" in dict(model.named_parameters())
+    assert controlled.model.diffusion_model.first is diffusion.first
+
+
+def test_download_is_revision_pinned_and_sha_verified(tmp_path, monkeypatch):
+    payload = b"verified control model"
+    downloaded = tmp_path / adapter.CONTROL_MODEL_FILENAME
+    downloaded.write_bytes(payload)
+    calls = {}
+    fake_hub = types.ModuleType("huggingface_hub")
+
+    def fake_download(**kwargs):
+        calls.update(kwargs)
+        return str(downloaded)
+
+    fake_hub.hf_hub_download = fake_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setattr(adapter, "CONTROL_MODEL_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(adapter, "load_control_state_dict", lambda path: {})
+
+    assert adapter.download_control_model(tmp_path) == downloaded.resolve()
+    assert calls["revision"] == adapter.CONTROL_MODEL_REVISION
+
+
+def test_download_rejects_wrong_sha(tmp_path, monkeypatch):
+    downloaded = tmp_path / adapter.CONTROL_MODEL_FILENAME
+    downloaded.write_bytes(b"corrupt")
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = lambda **_kwargs: str(downloaded)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    with pytest.raises(ValueError, match="Invalid depth-control-lora.safetensors SHA-256"):
+        adapter.download_control_model(tmp_path)
 
 
 def test_failure_guard_prevents_silent_uncontrolled_sampling():

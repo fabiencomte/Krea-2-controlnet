@@ -8,17 +8,19 @@ sampling, so this module only translates that checkpoint into a cloned
 
 from __future__ import annotations
 
+import hashlib
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 CONTROL_MODEL_REPO = "Patil/Krea-2-depth-controlnet"
 CONTROL_MODEL_FILENAME = "depth-control-lora.safetensors"
+CONTROL_MODEL_REVISION = "2e3ed7331854063f71853ab7213d2a2837a2be08"
+CONTROL_MODEL_SHA256 = "fb80547ed79b47c1e3fea7bb9d36297e3917b2115fab6700ca1501350f9f483c"
 LORA_TARGETS = (
     "attn.wq",
     "attn.wk",
@@ -36,7 +38,15 @@ def control_model_path(models_path: str | os.PathLike[str]) -> Path:
     return Path(models_path) / "ControlNet" / "Krea2" / CONTROL_MODEL_FILENAME
 
 
-@lru_cache(maxsize=2)
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=1)
 def _load_cached(path: str, modified_ns: int) -> Mapping[str, torch.Tensor]:
     del modified_ns
     from backend.utils import load_torch_file
@@ -65,9 +75,17 @@ def download_control_model(models_path: str | os.PathLike[str]) -> Path:
     downloaded = hf_hub_download(
         repo_id=CONTROL_MODEL_REPO,
         filename=CONTROL_MODEL_FILENAME,
+        revision=CONTROL_MODEL_REVISION,
         local_dir=str(destination.parent),
     )
     result = Path(downloaded).resolve()
+    digest = _sha256(result)
+    if digest != CONTROL_MODEL_SHA256:
+        raise ValueError(
+            f"Invalid {CONTROL_MODEL_FILENAME} SHA-256: {digest}; "
+            f"expected {CONTROL_MODEL_SHA256}."
+        )
+    _load_cached.cache_clear()
     load_control_state_dict(result)
     return result
 
@@ -79,72 +97,68 @@ def _shape(value: Any) -> tuple[int, ...] | None:
     return tuple(shape) if shape is not None else None
 
 
-def _projection_parts(
+def _projection_tensors(
     state_dict: Mapping[str, torch.Tensor], image_features: int, out_features: int
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     weight = state_dict.get("first.weight")
+    bias = state_dict.get("first.bias")
     expected = (out_features, image_features * 2)
     if not torch.is_tensor(weight) or tuple(weight.shape) != expected:
         actual = None if weight is None else tuple(weight.shape)
         raise ValueError(
             f"Invalid Krea 2 control first.weight: expected {expected}, got {actual}."
         )
-    return weight[:, image_features:].detach().to(device="cpu").contiguous()
+    expected_bias = (out_features,)
+    if not torch.is_tensor(bias) or tuple(bias.shape) != expected_bias:
+        actual = None if bias is None else tuple(bias.shape)
+        raise ValueError(
+            f"Invalid Krea 2 control first.bias: expected {expected_bias}, got {actual}."
+        )
+    return (
+        weight.detach().to(device="cpu").contiguous(),
+        bias.detach().to(device="cpu").contiguous(),
+    )
 
 
-class ControlProjection(nn.Module):
-    """Adds the learned depth half to the active Krea input projection.
+class ControlProjection:
+    """Official expanded Krea projection without replacing the live Forge layer.
 
-    Keeping the active projection for image tokens is important for quantised
-    checkpoints and for any regular LoRA already selected in Forge.
+    The tensors intentionally remain plain CPU tensors.  A temporary forward
+    hook casts them for each model call, while Forge retains ownership of the
+    real ``diffusion_model.first`` module and its low-VRAM lifecycle.
     """
 
-    def __init__(self, base_projection: nn.Module, control_weight: torch.Tensor):
-        super().__init__()
-        base_shape = _shape(getattr(base_projection, "weight", None))
-        if base_shape is None or len(base_shape) != 2:
-            raise ValueError("The active Krea input projection has no 2D weight.")
-        if tuple(control_weight.shape) != (base_shape[0], base_shape[1]):
-            raise ValueError(
-                "Control projection shape does not match the active Krea model: "
-                f"{tuple(control_weight.shape)} != {(base_shape[0], base_shape[1])}."
-            )
+    def __init__(self, weight: torch.Tensor, bias: torch.Tensor, image_features: int):
+        self.weight = weight
+        self.bias = bias
+        self.in_features = int(image_features)
 
-        self.in_features = int(base_shape[1])
-        self.out_features = int(base_shape[0])
-        self.control_weight = nn.Parameter(control_weight, requires_grad=False)
-        self.control_tokens: torch.Tensor | None = None
-        object.__setattr__(self, "_base_projection", base_projection)
-
-    @property
-    def base_projection(self) -> nn.Module:
-        return object.__getattribute__(self, "_base_projection")
-
-    def forward(self, image_tokens: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self, image_tokens: torch.Tensor, control_tokens: torch.Tensor
+    ) -> torch.Tensor:
         if image_tokens.shape[-1] != self.in_features:
             raise RuntimeError(
                 f"Krea image tokens have {image_tokens.shape[-1]} features; "
                 f"expected {self.in_features}."
             )
-        control = self.control_tokens
-        if control is None:
-            raise RuntimeError("Krea depth control tokens were not attached for this denoising step.")
-        if control.shape[1] != image_tokens.shape[1]:
+        if control_tokens.shape[1] != image_tokens.shape[1]:
             raise RuntimeError(
                 f"Krea token count mismatch: image={image_tokens.shape[1]}, "
-                f"depth={control.shape[1]}."
+                f"depth={control_tokens.shape[1]}."
             )
-        control = _repeat_batch(control, image_tokens.shape[0]).to(
+        control_tokens = _repeat_batch(control_tokens, image_tokens.shape[0]).to(
             device=image_tokens.device, dtype=image_tokens.dtype
         )
         from backend.memory_management import cast_to
 
         weight = cast_to(
-            self.control_weight,
-            device=image_tokens.device,
-            dtype=image_tokens.dtype,
+            self.weight, device=image_tokens.device, dtype=image_tokens.dtype
         )
-        return self.base_projection(image_tokens) + F.linear(control, weight, None)
+        bias = cast_to(
+            self.bias, device=image_tokens.device, dtype=image_tokens.dtype
+        )
+        combined = torch.cat((image_tokens, control_tokens), dim=-1)
+        return F.linear(combined, weight, bias)
 
 
 def _repeat_batch(tensor: torch.Tensor, batch: int) -> torch.Tensor:
@@ -263,25 +277,40 @@ def build_lora_patches(
 
 
 def _compose_control_wrapper(
+    first_module: Any,
     projection: ControlProjection,
     control_latent: torch.Tensor,
     patch_size: int,
     previous_wrapper: Any,
 ):
     def wrapper(model_function, call: dict[str, Any]):
-        previous_tokens = projection.control_tokens
-        try:
-            projection.control_tokens = make_control_tokens(
+        def controlled_model_function(input_, timestep, **conditioning):
+            control_tokens = make_control_tokens(
                 control_latent,
-                call["input"],
+                input_,
                 patch_size,
                 projection.in_features,
             )
-            if previous_wrapper is not None:
-                return previous_wrapper(model_function, call)
-            return model_function(call["input"], call["timestep"], **call["c"])
-        finally:
-            projection.control_tokens = previous_tokens
+            used = False
+
+            def project_first(_module, args, output):
+                nonlocal used
+                if used:
+                    return output
+                used = True
+                return projection(args[0], control_tokens)
+
+            handle = first_module.register_forward_hook(project_first)
+            try:
+                return model_function(input_, timestep, **conditioning)
+            finally:
+                handle.remove()
+
+        if previous_wrapper is not None:
+            return previous_wrapper(controlled_model_function, call)
+        return controlled_model_function(
+            call["input"], call["timestep"], **call["c"]
+        )
 
     return wrapper
 
@@ -320,8 +349,8 @@ def apply_depth_control(
         raise TypeError("The selected model is not compatible with the Krea 2 depth checkpoint.")
 
     projection = ControlProjection(
-        base_first,
-        _projection_parts(state_dict, int(base_shape[1]), int(base_shape[0])),
+        *_projection_tensors(state_dict, int(base_shape[1]), int(base_shape[0])),
+        image_features=int(base_shape[1]),
     )
     new_unet = unet.clone()
     patches = build_lora_patches(state_dict, unet.model.state_dict())
@@ -337,9 +366,9 @@ def apply_depth_control(
         )
 
     previous_wrapper = new_unet.model_options.get("model_function_wrapper")
-    new_unet.add_object_patch("diffusion_model.first", projection)
     new_unet.set_model_unet_function_wrapper(
         _compose_control_wrapper(
+            base_first,
             projection,
             control_latent.detach(),
             int(diffusion.patch),

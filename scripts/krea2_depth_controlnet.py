@@ -14,7 +14,7 @@ from forge_krea2_depth.adapter import (
     install_failure_guard,
     load_control_state_dict,
 )
-from forge_krea2_depth.images import create_depth_map
+from forge_krea2_depth.images import create_depth_map, generation_dimensions
 from modules import paths, scripts
 from modules.ui_components import InputAccordion
 
@@ -136,12 +136,13 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
                     "Krea 2 Depth ControlNet-LoRA requires a Krea 2 checkpoint."
                 )
 
+            width, height = generation_dimensions(p)
             depth = create_depth_map(
                 control_image,
                 str(preprocessor),
                 int(resolution),
-                int(p.width),
-                int(p.height),
+                width,
+                height,
                 bool(invert),
             )
             image = torch.from_numpy(depth.copy()).float().div_(255.0).unsqueeze(0)
