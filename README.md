@@ -1,12 +1,20 @@
 
 # Krea-2 Depth ControlNet-LoRA — Forge Classic 2.28.1 fork
 
-> [!NOTE]
-> The original project is a standalone inference and training toolkit, not a
-> Stable Diffusion WebUI extension. I thought the depth-control tool was too
-> useful to leave outside Forge, so I made this integration for
-> **sd-webui-forge-classic 2.28.1**, with a little help from AI. I hope it is
-> useful to other people in the community too.
+## Forge Classic 2.28.1 compatibility
+
+### Why this fork?
+
+The original Krea 2 depth-control project is a standalone inference and
+training toolkit, not a Stable Diffusion WebUI extension. Cloning it into
+`extensions` therefore did not add a Forge panel or connect it to Forge's model
+lifecycle, low-VRAM loading, Hires fix, Krea Edit references, or normal
+generation flow.
+
+I found the depth-control tool too useful to leave outside WebUI, so I turned it
+into a native integration for **sd-webui-forge-classic 2.28.1** and tested it
+through Forge's real generation lifecycle, with a little help from AI. I hope
+this fork saves other Forge users some time and proves useful to the community.
 
 This fork adds a native, always-visible Forge panel while keeping the original
 standalone scripts and training code available. It has been tested on Windows,
