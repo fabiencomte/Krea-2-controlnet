@@ -1,5 +1,5 @@
 
-# Krea-2 Depth ControlNet-LoRA — Forge Classic 2.28.1 fork
+# Krea-2 Depth + Pose ControlNet-LoRA — Forge Classic 2.28.1 fork
 
 ## Forge Classic 2.28.1 compatibility
 
@@ -12,13 +12,32 @@ lifecycle, low-VRAM loading, Hires fix, Krea Edit references, or normal
 generation flow.
 
 I found the depth-control tool too useful to leave outside WebUI, so I turned it
-into a native integration for **sd-webui-forge-classic 2.28.1** and tested it
-through Forge's real generation lifecycle, with a little help from AI. I hope
-this fork saves other Forge users some time and proves useful to the community.
+into a native integration for **sd-webui-forge-classic 2.28.1**, then added an
+independent Pose/OpenPose path based on the Krea 2 edit/reference architecture.
+Both paths are tested through Forge's real generation lifecycle.
 
 This fork adds a native, always-visible Forge panel while keeping the original
 standalone scripts and training code available. It has been tested on Windows,
 Python 3.13, Gradio 4.40 and a Krea 2 checkpoint using the Qwen/Krea image VAE.
+
+### What changed compared with the original project
+
+| Original standalone project | This Forge Classic fork |
+| --- | --- |
+| Command-line Depth inference and training utilities | Native txt2img/img2img always-on panel using Forge's generation lifecycle |
+| One Depth input per standalone run | An ordered file list with add, remove, reorder and click-to-edit; files alternate `A, B, C, A…` across batches and iterations |
+| Photo-to-depth or supplied Depth map | The same two Depth paths, with independent mode, preprocessor, resolution, inversion and strength for every file |
+| No Pose path | Photo-to-DWPose and supplied OpenPose-map paths, available in the same per-file list and usable sequentially with Depth |
+| No input-type assistance | Conservative colour/statistics detection of photo, Depth map and coloured OpenPose map; reliable detections select the direct-map path automatically and manual settings always win |
+| Input sizing owned by the standalone pipeline | Exact Forge and Hires dimensions with centered black letterboxing, no crop or stretch, plus a non-blocking ratio warning |
+| Fixed trained control contribution | `0–2` Depth/Pose strength slider; `0` is a true no-op |
+| No Forge preview/cache | Selected source and final-resolution preview, cache-all action, generation-local preprocessing cache, plus the active reference(s) in Forge's live preview while files and batches are prepared |
+| Models handled by the standalone setup | Revision-pinned, size- and SHA-256-verified Depth, Pose and DWPose downloads with safe cache reuse |
+| Standard PyTorch inference | Generation-local Forge patches compatible with low-VRAM loading and on-the-fly GGUF LoRA application |
+
+The lower half of this README keeps the original standalone documentation for
+training and command-line inference. The Forge-specific sections above are the
+extension layer added by this fork.
 
 ## Install in Forge Classic 2.28.1
 
@@ -29,19 +48,104 @@ git clone -b forge-classic-2.28.1 \
   https://github.com/fabiencomte/Krea-2-controlnet.git
 ```
 
-Open **Krea 2 Depth ControlNet-LoRA** below txt2img or img2img. Click
-**Download / verify model (862 MB)** once, add an image, keep
-`depth_anything_v2` selected, and enable the accordion before Generate. The
-official checkpoint is stored outside Git at:
+Open **Krea 2 Depth / Pose ControlNet-LoRA** below txt2img or img2img, add one or
+more images, adjust the selected row if needed, and click **Download / verify
+models needed by the list**. Enable the accordion before Generate. All
+downloaded weights live outside Git.
+
+### Depth mode
+
+Keep `depth_anything_v2` selected to turn photos into depth maps, or choose
+**None (already a depth map)**. White means near by default; use **Invert depth
+map** for the opposite convention. The 862 MB adapter is stored at:
 
 ```text
 models/ControlNet/Krea2/depth-control-lora.safetensors
 ```
 
-The Depth Anything V2 preprocessor downloads its own model through Forge on
-first use. You can also choose **None (already a depth map)** to supply a map
-directly. White means near by default; use **Invert depth map** when the input
-uses the opposite convention.
+Depth Anything V2 downloads its own model through Forge on first use.
+
+### Pose / OpenPose mode
+
+Choose **DWPose (photo to pose)** to extract body, hand and face keypoints from
+a photo, or **None (already an OpenPose map)** to provide the coloured skeleton
+directly. The extension installs the small `easy-dwpose==1.0.2` wrapper on Forge
+restart without downgrading Forge's shared dependencies. The button downloads
+and verifies the Pose adapter plus both DWPose ONNX weights; missing DWPose
+weights are also fetched automatically on first DWPose use:
+
+```text
+models/ControlNet/Krea2/krea2_turbo_openpose_controlnet.safetensors
+models/ControlNet/DWPose/dw-ll_ucoco_384.onnx
+models/ControlNet/DWPose/yolox_l.onnx
+```
+
+The Pose adapter is trained for **Krea 2 Turbo**. Other Krea 2 derivatives may
+load when their tensor layout matches, but their visual quality is not claimed.
+The selected Krea checkpoint must include the Krea/Qwen VAE and Qwen3-VL vision
+weights. Depth and Pose cannot be stacked in one simultaneous denoising batch,
+but they can alternate between sequential batches. Use **Batch size 1** when
+files have different modes or strengths. A simultaneous batch is accepted only
+when every active row in that batch has the same mode and strength; incompatible
+lists fail early with an actionable message.
+
+The source selector is an ordered list. Adding several files preserves their
+selection order and selects the newest row. Click a row to show its source,
+preview and private settings; **Move up**, **Move down**, **Remove selected** and
+**Clear list** keep the active row predictable. New files inherit the currently
+displayed settings before auto-detection is applied. The detector confidently
+recognises smooth near-grayscale Depth maps and sparse coloured OpenPose
+skeletons on black; ambiguous grayscale art, monochrome line drawings and
+ordinary photos keep the current settings. The detected type, confidence and
+reason remain visible, and manual choices always override the suggestion.
+
+**Preview selected** prepares one final-resolution control. **Cache all
+previews** prepares the whole list and reuses still-valid entries; changing a
+file's mode, preprocessor, resolution or inversion invalidates only that file,
+while changing strength keeps its visual preview. Changing Forge/Hires target
+dimensions invalidates every preview because their letterboxing changes. When a
+source aspect ratio differs, the complete control map is centered on the target
+canvas and unused space is filled with black bars: no edge is cropped and
+geometry is not stretched. The difference produces a non-blocking warning.
+
+Generation alternates the entries in `A, B, C, A…` order across batch positions
+and successive batches, including Pose visual-text conditioning. Scheduled
+preprocessors, raw control maps, final previews and verified adapter states are
+cached once at launch and reused across sampling and Hires passes. Duplicate
+files with identical processing settings share the expensive result. The cache
+is generation-local and is cleared after completion, interruption or error.
+When Forge live previews are enabled, each control appears while it is prepared,
+then the reference actually used by the current batch is shown; a simultaneous
+multi-image batch uses a labelled mini-grid before Forge's normal denoising
+preview takes over.
+
+Each row's **Control strength** is its structure-versus-prompt control. `0` is a
+true no-op, lower non-zero values give the prompt more freedom, and values above
+`1` tighten control at a possible quality cost. Depth uses `1` as its trained
+strength; Pose generally works best around `0.8–1.0`. Forge CFG stays separate.
+
+DWPose is designed for people. Occlusion, cropped limbs, very small subjects or
+non-human anatomy can produce incomplete keypoints; inspect the preview before
+generating. A Pose reference also adds image tokens, so high-resolution Hires
+jobs use more VRAM than plain Krea generation.
+
+### List behaviour and edge cases
+
+| Sequence | Result |
+| --- | --- |
+| Add one file | It becomes selected, inherits the visible editor settings, then confident auto-detection may choose a direct Depth/OpenPose input. |
+| Add several files | Their chooser order is preserved and the newest row becomes selected. Every row gets a unique identity, including duplicate paths. |
+| Click a row | Its source, settings and its own cached preview are shown; programmatic selection does not accidentally fire editor changes. |
+| Change mode/input/resolution/inversion | Only that row changes and only its preview is invalidated. Changing strength preserves the preview because the control pixels do not change. |
+| Move or remove first/middle/last | The edited file follows its row when moved; after removal the nearest surviving row is selected. Removed preview data is discarded. |
+| Clear, then add again | The list/cache is empty but the visible editor values remain useful as defaults for the next files. |
+| Fewer generated slots than list entries | Generation continues with the scheduled prefix and warns how many files are unused. |
+| More generated slots than entries | References cycle continuously in `A, B, C, A…` order across both batch positions and iterations. |
+| Same mode/strength, different preprocessors | A simultaneous batch is supported; each source is preprocessed with its own settings. |
+| Different modes or strengths in one simultaneous batch | Generation fails closed and asks for `Batch size 1`; compatible consecutive batches may still alternate modes. |
+| Missing/corrupt file, unavailable model or preprocessor error | The request fails closed instead of silently generating without control; temporary state is removed. |
+| Skip/interruption while caching or sampling | Further preparation stops, Pose conditioning is restored and generation-local maps/model states are released. The next request starts cleanly. |
+| Hires or target dimensions change | UI previews are cleared; generation reuses the expensive raw preprocessing but refits Depth to each real pass and keeps black bars centered. |
 
 ### Why this Forge integration is safe
 
@@ -57,6 +161,12 @@ uses the opposite convention.
   noisy image tokens only. Krea Edit reference tokens keep their normal path.
 - All 224 expected LoRA pairs are shape-checked before sampling. A partial or
   incompatible checkpoint is rejected instead of being applied silently.
+- Pose verifies all 256 rank-32 LoRA layers, encodes Qwen vision at no more than
+  `384×384` total pixels, limits the VAE reference to 1 MP, and reproduces the
+  trained `Picture 1` + `index_timestep_zero` contract. Each batch item keeps
+  its own visual embedding and clean reference latent.
+- GGUF checkpoints use Forge's required on-the-fly LoRA path, so deltas are
+  applied to dequantised logical weights instead of compressed byte storage.
 - A control error installs a fail-closed sampling guard. Forge cannot quietly
   continue with an uncontrolled image.
 - Generate, Skip and Interrupt remain entirely owned by Forge. The temporary
@@ -64,25 +174,68 @@ uses the opposite convention.
 - The WebUI API accepts the same base64 image format as `/sdapi/v1/txt2img`.
   Its booleans, resolution and strength are validated strictly, so an ambiguous
   or out-of-range request fails closed instead of silently changing meaning.
-- The model download is pinned to the official file revision and checked against
-  SHA-256 `fb80547ed79b47c1e3fea7bb9d36297e3917b2115fab6700ca1501350f9f483c`.
-  Normal generation verifies the same hash before loading, while the download
-  button reuses a valid local file and replaces a corrupt one.
-- Hires fix rebuilds the control map at the second pass's real dimensions, so a
-  changed aspect ratio is not first cropped square and then stretched.
+- Every download is revision-pinned and SHA-256 verified. Depth uses
+  `fb80547ed79b47c1e3fea7bb9d36297e3917b2115fab6700ca1501350f9f483c`, Pose uses
+  `0ddc3aafce4abdf7af3309b2f00c1bacdf15df1f2b4fb7adc9ff71795da90ecf`, and the
+  DWPose pose/detector weights use `724f4ff2439ed61afb86fb8a1951ec39c6220682803b4a8bd4f598cd913b1843`
+  and `7860ae79de6c89a3c1eb72ae9a2756c0ccfbe04b7791bb5880afabd97855a411`.
+  A valid local file is reused; a corrupt file is replaced.
+- Depth preprocesses each source once, then refits the cached raw map to every
+  sampling pass's real dimensions. Pose also preprocesses once and reuses the
+  same uncropped, final-resolution letterboxed structure for both Hires passes.
 
 ### Verified cases
 
-- 41 automated tests: official checkpoint layout, completeness and tensor
-  shapes, full projection weight/bias, CFG batch repetition, non-square and
-  changed-ratio Hires resize, image/API contracts, previous-wrapper multi-call
-  composition, one-shot Krea Edit behavior, low-VRAM dtype casts, strict API
-  controls, pinned local/download integrity, and cleanup after an interrupt-like
-  exception;
-- real Krea 2 generation at 128×128 and an 8-step 512×512 generation using
-  Depth Anything V2;
-- deterministic enabled/disabled comparison proving that control changes the
-  denoising result;
+- 93 automated tests: official checkpoint layout, completeness and logical GGUF
+  tensor shapes, on-the-fly GGUF patching, full projection weight/bias, CFG
+  batch repetition, per-file list editing/reordering/removal, conservative
+  Depth/OpenPose/photo detection, mixed-mode batch validation, generation and
+  preview cache reuse, duplicate files, interruption cleanup, multi-image
+  alternation, centered black letterboxing,
+  non-square and changed-ratio Hires dimensions, preview/API contracts,
+  previous-wrapper multi-call composition, one-shot Krea Edit behavior,
+  low-VRAM dtype casts, strict controls, pinned local/download integrity, Pose
+  per-image visual conditioning, t=0 reference modulation, DWPose body/hand/face
+  rendering, and cleanup after an interrupt-like exception;
+- release-candidate end-to-end matrix in Forge/Gradio 4.40 with four ordered
+  entries: photo→Depth Anything V2, photo→DWPose, supplied Depth map and
+  supplied OpenPose map. `Cache all previews` produced four 128×128 previews,
+  reported two non-blocking ratio warnings and preserved every source with
+  centered black bars; sequential generation produced four saved 128×128
+  images, while metadata recorded four control files and both adapter paths;
+- per-file strength persistence was rechecked at `0.65`, including selection
+  changes and inheritance by a newly added file; add, move up/down and remove
+  all completed without losing the other entries' settings;
+- the same mismatched-ratio photo completed a real Hires 128→256 generation;
+  the saved result was 256×256 and the uncropped letterboxed control preview
+  matched both passes;
+- the model action re-verified the Depth adapter, Pose adapter and both DWPose
+  ONNX files from the UI. A mixed simultaneous batch was then rejected with the
+  `set Batch size to 1` instruction, a normal request recovered, a four-entry
+  run exposed active reference `2` in Forge's live progress, interruption at
+  75% returned control to the UI, and the following request completed cleanly;
+- a real GGUF Krea 2 batch generation with two different control images at
+  256×256, producing two saved images with the expected extension metadata;
+- real two-file estimated batches for both photo→Depth Anything V2 and
+  photo→DWPose, with references `1, 2` observed through Forge's live-preview
+  channel and `Images: 2` recorded in generation metadata;
+- real Pose GGUF generations on an RTX 4060 Ti 16 GB: single image, two distinct
+  references in one batch, and Hires 128→256 using a mismatched-ratio map;
+- real Gradio 4.40 list interaction: multi-file chooser, row selection, inherited
+  settings, per-file mode changes, add/reorder/remove, cache status
+  synchronisation, full uncropped previews, black bars and a non-blocking ratio
+  warning;
+- real colour detection on a generated DWPose map (**OpenPose 93%**) and a
+  Depth map (**Depth 95%**), with both direct-map preprocessors selected
+  automatically and a normal photo left on its estimator path;
+- a real mixed sequential list (`Batch size 1`, `Batch count 2`) containing a
+  supplied OpenPose map followed by a supplied Depth map; both images completed,
+  active references `1` and `2` and both adapter paths appeared in infotext;
+- a real incompatible simultaneous mixed batch failed closed with the visible
+  `set Batch size to 1` instruction, followed by a successful controlled request
+  proving cleanup/recovery;
+- deterministic strength comparisons with the same prompt and seed for both
+  paths; Pose `0.85` versus `0.25` produced a 104.27 mean absolute pixel change;
 - Skip during batch 1/2, continuation and successful batch 2/2;
 - Interrupt during sampling followed by a clean controlled generation;
 - Ruff, `compileall`, `git diff --check`, UI load and API infotext metadata.
@@ -91,31 +244,48 @@ Run the tests from this repository:
 
 ```bash
 python -m pytest -q tests
-python -m ruff check forge_krea2_depth scripts tests
-python -m compileall -q forge_krea2_depth scripts tests
+python -m ruff check forge_krea2_depth scripts tests install.py
+python -m compileall -q forge_krea2_depth scripts tests install.py
 ```
 
 ### API example
 
-Use the always-on script name `Krea 2 Depth ControlNet-LoRA` and these six
-arguments:
+Use the always-on script name `Krea 2 Depth / Pose ControlNet-LoRA` and these
+seven arguments: enabled, mode, one image or a list, preprocessor, resolution,
+invert-depth, strength.
 
 ```json
 {
   "alwayson_scripts": {
-    "Krea 2 Depth ControlNet-LoRA": {
-      "args": [true, "data:image/png;base64,...", "depth_anything_v2", 768, false, 1.0]
+    "Krea 2 Depth / Pose ControlNet-LoRA": {
+      "args": [
+        true,
+        "Pose / OpenPose",
+        [
+          "data:image/png;base64,...",
+          "data:image/png;base64,..."
+        ],
+        "DWPose (photo to pose)",
+        768,
+        false,
+        0.85
+      ]
     }
   }
 }
 ```
 
-For API calls, keep the two checkbox values as JSON booleans, the resolution as
-an integer from 256 to 2048, and the strength as a finite number from 0 to 2.
+For API calls, keep both checkbox values as JSON booleans, the resolution as an
+integer from 256 to 2048, and strength as a finite number from 0 to 2. Valid
+mode strings are `Depth` and `Pose / OpenPose`.
 
-The upstream repository currently contains no code license file. This fork does
-not invent or change one. Model weights remain subject to the
-[Krea 2 community license](https://www.krea.ai/krea-2-licensing).
+The upstream depth repository currently contains no code license file. This fork
+does not invent or change one. The Pose reference algorithm is adapted from the
+MIT-licensed [Ostris Krea 2 edit implementation](https://github.com/ostris/ComfyUI-Krea2-Ostris-Edit),
+and DWPose is Apache-2.0. Model weights remain subject to their source terms and
+the [Krea 2 community license](https://www.krea.ai/krea-2-licensing). The Pose
+adapter comes from [thedeoxen/Krea-2-pose-controlnet](https://huggingface.co/thedeoxen/Krea-2-pose-controlnet);
+the DWPose weights come from [RedHash/DWPose](https://huggingface.co/RedHash/DWPose).
 
 ---
 

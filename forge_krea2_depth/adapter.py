@@ -107,10 +107,16 @@ def download_control_model(models_path: str | os.PathLike[str]) -> Path:
 
 
 def _shape(value: Any) -> tuple[int, ...] | None:
-    shape = getattr(value, "tensor_shape", None)
-    if shape is None:
-        shape = getattr(value, "shape", None)
-    return tuple(shape) if shape is not None else None
+    # Forge's ParameterGGUF keeps the logical matrix dimensions in
+    # ``real_shape`` while its raw Q8_0 byte storage is wider (for example a
+    # 6144-column matrix occupies 6528 bytes per row).  Shape validation must
+    # use the logical dimensions or every compatible GGUF checkpoint is
+    # rejected before Forge gets a chance to apply the LoRA patch.
+    for attribute in ("real_shape", "tensor_shape", "shape"):
+        shape = getattr(value, attribute, None)
+        if shape is not None:
+            return tuple(shape)
+    return None
 
 
 def _projection_tensors(
@@ -334,7 +340,7 @@ def _compose_control_wrapper(
 def install_failure_guard(process, error: Exception) -> None:
     """Make sampling fail hard when Forge has swallowed a script-hook error."""
 
-    message = f"Krea 2 Depth ControlNet-LoRA could not be applied: {error}"
+    message = f"Krea 2 ControlNet-LoRA could not be applied: {error}"
     unet = process.sd_model.forge_objects.unet.clone()
 
     def fail_sampling(model_function, call):
@@ -369,12 +375,24 @@ def apply_depth_control(
         image_features=int(base_shape[1]),
     )
     new_unet = unet.clone()
-    patches = build_lora_patches(state_dict, unet.model.state_dict())
+    # ``state_dict()`` detaches GGUF parameters into raw byte tensors and drops
+    # their logical ``real_shape`` metadata.  Named parameters keep the live
+    # ParameterGGUF objects while using the exact same Forge patch keys.
+    model_parameters = dict(unet.model.named_parameters())
+    patches = build_lora_patches(state_dict, model_parameters)
+    # Forge must dequantise GGUF weights before applying LoRA deltas.  Its
+    # normal LoRA loader does that by forwarding ``dynamic_args.online_lora``
+    # to ``add_patches``; programmatic extensions have to do the same.  Without
+    # this flag, the delta is incorrectly applied to compressed Q8 byte rows.
+    from backend.args import dynamic_args
+
+    online_mode = bool(dynamic_args.online_lora)
     accepted = new_unet.add_patches(
         patches,
         strength_patch=float(strength),
         strength_model=1.0,
         filename=CONTROL_MODEL_FILENAME,
+        online_mode=online_mode,
     )
     if len(accepted) != len(patches):
         raise ValueError(
