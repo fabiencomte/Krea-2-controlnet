@@ -62,6 +62,20 @@ def test_builds_every_expected_lora_pair():
     assert sample.weights[2] == 2.0
 
 
+def test_build_uses_logical_gguf_shape_instead_of_compressed_byte_shape():
+    state, model = make_state()
+
+    class FakeGGUFWeight:
+        shape = (6, 5)
+        real_shape = torch.Size((6, 4))
+
+    model["diffusion_model.blocks.0.attn.wq.weight"] = FakeGGUFWeight()
+
+    patches = build_lora_patches(state, model)
+
+    assert len(patches) == EXPECTED_BLOCKS * len(LORA_TARGETS)
+
+
 def test_rejects_partial_checkpoint_instead_of_silently_degrading():
     state, model = make_state()
     del state["blocks.7.mlp.up.B"]
@@ -117,6 +131,15 @@ def test_control_tokens_resize_repeat_and_patchify():
     assert tokens.shape == (2, 4, 4)
     torch.testing.assert_close(tokens[0], tokens[1])
     assert tokens[0, 0].tolist() == [0.0, 1.0, 4.0, 5.0]
+
+
+def test_control_tokens_preserve_alternation_when_cfg_repeats_the_batch():
+    latent = torch.tensor([1.0, 2.0]).reshape(2, 1, 1, 1)
+    sample = torch.zeros(4, 1, 1, 1, 1)
+
+    tokens = make_control_tokens(latent, sample, patch_size=1, expected_features=1)
+
+    assert tokens[:, 0, 0].tolist() == [1.0, 2.0, 1.0, 2.0]
 
 
 def test_control_tokens_reject_wrong_vae_channels():
@@ -184,6 +207,10 @@ def test_wrapper_removes_hook_after_interrupt_like_exception(monkeypatch):
 
 
 def test_apply_control_keeps_first_registered_and_avoids_object_patch(monkeypatch):
+    fake_backend_args = types.ModuleType("backend.args")
+    fake_backend_args.dynamic_args = types.SimpleNamespace(online_lora=True)
+    monkeypatch.setitem(sys.modules, "backend.args", fake_backend_args)
+
     class FakeUnet:
         def __init__(self, model):
             self.model = model
@@ -213,11 +240,17 @@ def test_apply_control_keeps_first_registered_and_avoids_object_patch(monkeypatc
     model = nn.Module()
     model.diffusion_model = diffusion
     unet = FakeUnet(model)
+    captured = {}
     state = {
         "first.weight": torch.zeros(6, 8),
         "first.bias": torch.zeros(6),
     }
-    monkeypatch.setattr(adapter, "build_lora_patches", lambda *_: {"layer": object()})
+
+    def build_patches(_state, model_parameters):
+        captured.update(model_parameters)
+        return {"layer": object()}
+
+    monkeypatch.setattr(adapter, "build_lora_patches", build_patches)
 
     controlled = adapter.apply_depth_control(
         unet, torch.zeros(1, 1, 4, 4), state, 1.0
@@ -225,9 +258,11 @@ def test_apply_control_keeps_first_registered_and_avoids_object_patch(monkeypatc
 
     assert controlled.object_patches == {}
     assert "diffusion_model.first.weight" in dict(model.named_parameters())
+    assert captured["diffusion_model.first.weight"] is diffusion.first.weight
     assert controlled.model.diffusion_model.first is diffusion.first
     assert controlled.patch_kwargs["strength_patch"] == 1.0
     assert controlled.patch_kwargs["strength_model"] == 1.0
+    assert controlled.patch_kwargs["online_mode"] is True
 
 
 def test_download_is_revision_pinned_and_sha_verified(tmp_path, monkeypatch):
