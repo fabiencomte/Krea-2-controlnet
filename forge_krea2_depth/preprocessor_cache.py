@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import threading
 from collections import OrderedDict
@@ -10,12 +11,13 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import numpy as np
+from PIL import Image
 
 from forge_krea2_depth.images import normalize_image
 
 
 CACHE_SCHEMA_VERSION = 1
-DEFAULT_MAX_ENTRIES = 128
+DEFAULT_MAX_ENTRIES = 512
 DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 
 
@@ -28,12 +30,13 @@ def _array_digest(value: np.ndarray) -> bytes:
     return digest.digest()
 
 
-def source_fingerprint(source: Any) -> bytes:
-    """Fingerprint decoded pixels, so paths and in-place file changes are safe."""
+def prepare_control_source(source: Any) -> tuple[Any, bytes]:
+    """Return one stable decoded snapshot and its content fingerprint."""
 
     normalized_source = os.fspath(source) if isinstance(source, os.PathLike) else source
     try:
-        return _array_digest(normalize_image(normalized_source))
+        snapshot = normalize_image(normalized_source)
+        return snapshot, _array_digest(snapshot)
     except ValueError:
         # Tests and third-party API wrappers can use opaque source handles which
         # their patched preprocessors understand. Real invalid images still fail
@@ -42,8 +45,15 @@ def source_fingerprint(source: Any) -> bytes:
             digest = hashlib.blake2b(digest_size=20)
             digest.update(type(source).__name__.encode("ascii"))
             digest.update(os.fspath(source).encode("utf-8", errors="surrogatepass"))
-            return digest.digest()
+            return normalized_source, digest.digest()
         raise
+
+
+def source_fingerprint(source: Any) -> bytes:
+    """Fingerprint decoded pixels, so paths and in-place file changes are safe."""
+
+    _snapshot, fingerprint = prepare_control_source(source)
+    return fingerprint
 
 
 @dataclass(frozen=True)
@@ -62,10 +72,14 @@ def build_control_map_cache_key(
     preprocessor: str,
     resolution: int,
     invert: bool,
+    *,
+    source_digest: bytes | None = None,
 ) -> ControlMapCacheKey:
     return ControlMapCacheKey(
         schema_version=CACHE_SCHEMA_VERSION,
-        source_digest=source_fingerprint(source),
+        source_digest=(
+            source_fingerprint(source) if source_digest is None else source_digest
+        ),
         mode=str(mode),
         preprocessor=str(preprocessor),
         resolution=int(resolution),
@@ -75,8 +89,32 @@ def build_control_map_cache_key(
 
 @dataclass
 class _CacheEntry:
-    result: np.ndarray
+    payload: np.ndarray | bytes
+    compressed: bool
     size_bytes: int
+
+    def restore(self) -> np.ndarray:
+        if not self.compressed:
+            return self.payload.copy()
+        with Image.open(io.BytesIO(self.payload)) as image:
+            return np.ascontiguousarray(np.asarray(image).copy())
+
+
+def _pack_result(result: np.ndarray) -> _CacheEntry:
+    cached = np.ascontiguousarray(result).copy()
+    if cached.dtype == np.uint8 and (
+        cached.ndim == 2 or (cached.ndim == 3 and cached.shape[2] in (3, 4))
+    ):
+        try:
+            output = io.BytesIO()
+            Image.fromarray(cached).save(output, format="PNG", compress_level=1)
+            encoded = output.getvalue()
+            if len(encoded) < cached.nbytes:
+                return _CacheEntry(encoded, True, len(encoded))
+        except Exception:
+            # Unusual NumPy layouts or unsupported PIL modes simply use raw RAM.
+            pass
+    return _CacheEntry(cached, False, cached.nbytes)
 
 
 class ControlMapCache:
@@ -101,6 +139,13 @@ class ControlMapCache:
     @property
     def enabled(self) -> bool:
         return self._max_entries > 0 and self._max_bytes > 0
+
+    @property
+    def revision(self) -> int:
+        """Change whenever an explicit clear invalidates derived UI previews."""
+
+        with self._lock:
+            return self._generation
 
     def configure(self, max_entries: int, max_bytes: int) -> None:
         with self._lock:
@@ -147,14 +192,31 @@ class ControlMapCache:
                 if entry is not None:
                     self._entries.move_to_end(key)
                     self._hits += 1
-                    return entry.result.copy(), True
-                pending = self._pending.get(key)
+                    cached_entry = entry
+                else:
+                    cached_entry = None
+                if cached_entry is not None:
+                    pending = None
+                else:
+                    pending = self._pending.get(key)
                 if pending is None:
-                    pending = threading.Event()
-                    self._pending[key] = pending
-                    owner_generation = self._generation
-                    bypass_cache = False
-                    break
+                    if cached_entry is None:
+                        pending = threading.Event()
+                        self._pending[key] = pending
+                        owner_generation = self._generation
+                        bypass_cache = False
+                        break
+            if cached_entry is not None:
+                try:
+                    return cached_entry.restore(), True
+                except Exception:
+                    # A decode/allocation failure must degrade to recomputation,
+                    # never turn a cache optimisation into a generation failure.
+                    with self._lock:
+                        if self._entries.get(key) is cached_entry:
+                            self._entries.pop(key)
+                            self._current_bytes -= cached_entry.size_bytes
+                    continue
             pending.wait()
 
         if bypass_cache:
@@ -168,24 +230,30 @@ class ControlMapCache:
                 pending.set()
             raise
 
+        packed = None
+        if isinstance(result, np.ndarray):
+            try:
+                # Compression happens outside the cache lock so unrelated images
+                # can still hit or start preprocessing concurrently.
+                packed = _pack_result(result)
+            except Exception:
+                pass
         with self._lock:
             self._misses += 1
             try:
                 if (
                     self.enabled
                     and owner_generation == self._generation
-                    and isinstance(result, np.ndarray)
+                    and packed is not None
                 ):
-                    cached = np.ascontiguousarray(result).copy()
-                    size_bytes = cached.nbytes
-                    # A single oversized map is returned normally without
+                    # An incompressible oversized map is returned normally without
                     # evicting useful resident sequence entries it cannot replace.
-                    if size_bytes <= self._max_bytes:
+                    if packed.size_bytes <= self._max_bytes:
                         previous = self._entries.pop(key, None)
                         if previous is not None:
                             self._current_bytes -= previous.size_bytes
-                        self._entries[key] = _CacheEntry(cached, size_bytes)
-                        self._current_bytes += size_bytes
+                        self._entries[key] = packed
+                        self._current_bytes += packed.size_bytes
                         self._evict_to_limits()
             except Exception:
                 # Caching is only an optimisation; a valid inference must survive

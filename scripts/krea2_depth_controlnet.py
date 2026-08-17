@@ -57,6 +57,7 @@ from forge_krea2_depth.pose import (
 from forge_krea2_depth.preprocessor_cache import (
     ControlMapCache,
     build_control_map_cache_key,
+    prepare_control_source,
     source_fingerprint,
 )
 from modules import paths, scripts, shared
@@ -259,9 +260,12 @@ def _entry_status(entries, selected_index=-1, message="") -> str:
     )
 
 
-def _preview_signature(entry):
+def _preview_signature(entry, source_digest=None, cache_revision=None):
     return (
-        source_fingerprint(entry["source"]),
+        _CONTROL_MAP_CACHE.revision if cache_revision is None else cache_revision,
+        source_fingerprint(entry["source"])
+        if source_digest is None
+        else source_digest,
         entry["mode"],
         entry["preprocessor"],
         entry["resolution"],
@@ -545,23 +549,25 @@ def _create_control_map(
 def _preprocess_control_map(mode, image, preprocessor, resolution, invert):
     """Reuse raw Depth/DWPose maps across previews and Generate clicks."""
 
+    source, source_digest = prepare_control_source(image)
     key = build_control_map_cache_key(
-        image,
+        source,
         mode,
         preprocessor,
         resolution,
         invert if mode == DEPTH_MODE else False,
+        source_digest=source_digest,
     )
 
     def compute():
         if mode == POSE_MODE:
             return preprocess_pose_map(
-                image,
+                source,
                 preprocessor,
                 resolution,
                 paths.models_path,
             )
-        return preprocess_depth_map(image, preprocessor, resolution, invert)
+        return preprocess_depth_map(source, preprocessor, resolution, invert)
 
     result, _hit = _CONTROL_MAP_CACHE.get_or_compute(key, compute)
     return result
@@ -573,6 +579,19 @@ def _clear_preprocessor_cache() -> None:
 
 def _preprocessor_cache_info() -> dict[str, int]:
     return _CONTROL_MAP_CACHE.info()
+
+
+def _clear_cached_maps(preview_cache):
+    info = _preprocessor_cache_info()
+    preview_count = len(preview_cache or {})
+    _clear_preprocessor_cache()
+    megabytes = info["bytes"] / (1024 * 1024)
+    return (
+        {},
+        None,
+        f"✅ Cleared {info['entries']} raw map(s) ({megabytes:.1f} MiB) and "
+        f"{preview_count} preview(s).",
+    )
 
 
 def _preview(
@@ -642,6 +661,7 @@ def _preview_entry(
     hr_scale=1.0,
     hr_resize_x=0,
     hr_resize_y=0,
+    _return_signature=False,
 ):
     width, height = preview_dimensions(
         width,
@@ -653,6 +673,11 @@ def _preview_entry(
         getattr(shared.opts, "res_step", 8),
     )
     source = normalize_images(entry["source"])[0]
+    signature = _preview_signature(
+        entry,
+        source_digest=source_fingerprint(source),
+        cache_revision=_CONTROL_MAP_CACHE.revision,
+    )
     warning = ratio_warning([source], width, height)
     result = _create_control_map(
         entry["mode"],
@@ -663,7 +688,8 @@ def _preview_entry(
         height,
         entry["invert"],
     )
-    return result, warning, width, height
+    values = (result, warning, width, height)
+    return (*values, signature) if _return_signature else values
 
 
 def _preview_selected_entry(
@@ -681,7 +707,7 @@ def _preview_selected_entry(
     if not entries or not 0 <= int(selected_index) < len(entries):
         raise ValueError("Select a control file before preparing its preview.")
     entry = entries[int(selected_index)]
-    result, warning, width, height = _preview_entry(
+    result, warning, width, height, signature = _preview_entry(
         entry,
         width,
         height,
@@ -689,10 +715,11 @@ def _preview_selected_entry(
         hr_scale,
         hr_resize_x,
         hr_resize_y,
+        _return_signature=True,
     )
     cache = dict(cache or {})
     cache[entry["id"]] = {
-        "signature": _preview_signature(entry),
+        "signature": signature,
         "image": result,
         "dimensions": (width, height),
         "warning": warning,
@@ -733,7 +760,7 @@ def _cache_all_previews(
     for entry in entries:
         result = _cache_for_entry(cache, entry, expected_dimensions)
         if result is None:
-            result, warning, final_width, final_height = _preview_entry(
+            result, warning, final_width, final_height, signature = _preview_entry(
                 entry,
                 width,
                 height,
@@ -741,9 +768,10 @@ def _cache_all_previews(
                 hr_scale,
                 hr_resize_x,
                 hr_resize_y,
+                _return_signature=True,
             )
             cache[entry["id"]] = {
-                "signature": _preview_signature(entry),
+                "signature": signature,
                 "image": result,
                 "dimensions": (final_width, final_height),
                 "warning": warning,
@@ -792,6 +820,16 @@ def _download_models(entries, selected_mode):
     # Do not retain maps produced by the previous model files.
     _clear_preprocessor_cache()
     return "  \n".join(lines)
+
+
+def _download_models_for_ui(entries, selected_mode):
+    status = _download_models(entries, selected_mode)
+    return (
+        status,
+        {},
+        None,
+        "Models verified; raw maps and rendered previews were cleared.",
+    )
 
 
 def _final_dimensions(process) -> tuple[int, int]:
@@ -1259,6 +1297,7 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
                 redetect_button = gr.Button("Re-detect selected", variant="secondary")
                 preview_button = gr.Button("Preview selected", variant="secondary")
                 cache_all_button = gr.Button("Cache all previews", variant="secondary")
+                clear_cache_button = gr.Button("Clear cached maps", variant="secondary")
                 download_button = gr.Button(
                     "Download / verify models needed by the list", variant="secondary"
                 )
@@ -1290,6 +1329,7 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
             redetect_button,
             preview_button,
             cache_all_button,
+            clear_cache_button,
             download_button,
             preview,
             ratio_status,
@@ -1432,8 +1472,15 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
             inputs=[entries_state, selected_index, preview_cache, *dimension_inputs],
             outputs=[preview, ratio_status, preview_cache],
         )
+        clear_cache_button.click(
+            fn=_clear_cached_maps,
+            inputs=[preview_cache],
+            outputs=[preview_cache, preview, ratio_status],
+        )
         download_button.click(
-            fn=_download_models, inputs=[entries_state, mode], outputs=[model_status]
+            fn=_download_models_for_ui,
+            inputs=[entries_state, mode],
+            outputs=[model_status, preview_cache, preview, ratio_status],
         )
         for dimension in dimension_inputs:
             dimension.change(

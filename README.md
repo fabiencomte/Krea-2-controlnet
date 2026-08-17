@@ -212,10 +212,12 @@ limit is distinct from source-map leakage, which the cached K/V path removes.
 - Depth and DWPose preprocessing is cached persistently by decoded image pixels
   and preprocessing settings, so previews, duplicate files, sequences and later
   Generate clicks reuse the same raw map. A changed image or setting gets a new
-  result automatically. The thread-safe LRU keeps at most 128 maps / 256 MiB,
+  result automatically. The thread-safe LRU keeps at most 512 maps / 256 MiB,
   while per-generation cleanup still releases its process-local references and
   sampling state. Raw maps are refitted to each sampling pass's real dimensions,
-  including Hires.
+  including Hires. Compressible maps are stored as lossless PNG data so long
+  sequences remain resident longer; **Clear cached maps** releases both raw maps
+  and UI previews immediately.
 
 ### Verified cases
 

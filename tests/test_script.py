@@ -234,6 +234,7 @@ def test_panel_contract_and_preprocessor_choices(monkeypatch, tmp_path):
         "Re-detect selected",
         "Preview selected",
         "Cache all previews",
+        "Clear cached maps",
         "Download / verify models needed by the list",
     ]
     assert not any(label in button_labels for label in ("Generate", "Skip", "Interrupt"))
@@ -1022,6 +1023,72 @@ def test_changed_pixels_or_settings_do_not_reuse_stale_preprocessing(
     assert calls == [(1, 768, False), (2, 768, False), (2, 1024, False), (2, 1024, True)]
 
 
+def test_strength_and_canvas_changes_refit_without_reprocessing(monkeypatch, tmp_path):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "preprocess_depth_map",
+        lambda *_args: calls.append(True)
+        or np.full((6, 10, 3), 80, dtype=np.uint8),
+    )
+    monkeypatch.setattr(module, "load_control_state_dict", lambda _path: {"ok": True})
+    entry = {
+        "id": "same",
+        "source": np.full((5, 7, 3), 42, dtype=np.uint8),
+        "name": "same",
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+        "strength": 0.25,
+    }
+
+    first = make_process()
+    first_cache = module._prepare_generation_cache(first, [entry])
+    module._cleanup_control_cache(first)
+    entry["strength"] = 1.75
+    second = make_process()
+    second.width, second.height = 128, 64
+    second_cache = module._prepare_generation_cache(second, [entry])
+
+    assert len(calls) == 1
+    assert first_cache["previews"]["same"].shape == (32, 64, 3)
+    assert second_cache["previews"]["same"].shape == (64, 128, 3)
+
+
+def test_mutating_source_during_preprocessing_cannot_miskey_result(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    source = np.full((4, 5, 3), 10, dtype=np.uint8)
+    calls = []
+
+    def preprocess(snapshot, *_args):
+        value = int(snapshot[0, 0, 0])
+        calls.append(value)
+        source[:] = 20
+        return np.asarray(snapshot)
+
+    monkeypatch.setattr(module, "preprocess_depth_map", preprocess)
+
+    first = module._preprocess_control_map(
+        module.DEPTH_MODE, source, module.DEPTH_DIRECT, 768, False
+    )
+    second = module._preprocess_control_map(
+        module.DEPTH_MODE, source, module.DEPTH_DIRECT, 768, False
+    )
+    source[:] = 10
+    revisited = module._preprocess_control_map(
+        module.DEPTH_MODE, source, module.DEPTH_DIRECT, 768, False
+    )
+
+    assert calls == [10, 20]
+    assert np.all(first == 10)
+    assert np.all(second == 20)
+    assert np.all(revisited == 10)
+
+
 def test_file_rewritten_at_same_path_invalidates_preview_signature(
     monkeypatch, tmp_path
 ):
@@ -1044,6 +1111,109 @@ def test_file_rewritten_at_same_path_invalidates_preview_signature(
     }
 
     Image.fromarray(np.full((3, 4, 3), 255, dtype=np.uint8)).save(path)
+
+    assert module._cache_for_entry(cache, entry) is None
+
+
+def test_explicit_preprocessor_clear_invalidates_ui_previews(monkeypatch, tmp_path):
+    module = load_script(monkeypatch, tmp_path)
+    entry = {
+        "id": "preview",
+        "source": np.zeros((3, 4, 3), dtype=np.uint8),
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+    }
+    cache = {
+        "preview": {
+            "signature": module._preview_signature(entry),
+            "image": np.ones((2, 2, 3), dtype=np.uint8),
+        }
+    }
+
+    module._clear_preprocessor_cache()
+
+    assert module._cache_for_entry(cache, entry) is None
+
+
+def test_clear_cached_maps_reports_and_removes_raw_and_ui_entries(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    source = np.zeros((3, 4, 3), dtype=np.uint8)
+    module._CONTROL_MAP_CACHE.get_or_compute(
+        module.build_control_map_cache_key(
+            source, module.DEPTH_MODE, module.DEPTH_DIRECT, 768, False
+        ),
+        lambda: np.zeros((64, 64, 3), dtype=np.uint8),
+    )
+
+    previews, selected, status = module._clear_cached_maps(
+        {"one": {"image": source}, "two": {"image": source}}
+    )
+
+    assert previews == {}
+    assert selected is None
+    assert "1 raw map(s)" in status
+    assert "2 preview(s)" in status
+    assert module._preprocessor_cache_info()["entries"] == 0
+
+
+def test_preview_signature_stays_bound_to_snapshot_if_file_changes_mid_render(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    path = tmp_path / "racing-control.png"
+    Image.fromarray(np.zeros((3, 4, 3), dtype=np.uint8)).save(path)
+    entry = {
+        "id": "racing-preview",
+        "source": str(path),
+        "name": "racing preview",
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+        "strength": 1.0,
+    }
+
+    def render(_mode, _source, *_args):
+        Image.fromarray(np.full((3, 4, 3), 255, dtype=np.uint8)).save(path)
+        return np.zeros((32, 64, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(module, "_create_control_map", render)
+
+    _preview, _status, cache = module._preview_selected_entry(
+        [entry], 0, {}, 64, 32
+    )
+
+    assert module._cache_for_entry(cache, entry) is None
+
+
+def test_preview_completing_after_explicit_clear_remains_invalid(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    entry = {
+        "id": "cleared-preview",
+        "source": np.zeros((3, 4, 3), dtype=np.uint8),
+        "name": "cleared preview",
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+        "strength": 1.0,
+    }
+
+    def render(*_args):
+        module._clear_preprocessor_cache()
+        return np.zeros((32, 64, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(module, "_create_control_map", render)
+
+    _preview, _status, cache = module._preview_selected_entry(
+        [entry], 0, {}, 64, 32
+    )
 
     assert module._cache_for_entry(cache, entry) is None
 
@@ -1112,6 +1282,51 @@ def test_sequence_cache_reuses_content_duplicates_and_next_generate(
     assert calls == [10, 20]
 
 
+def test_partial_sequence_interruption_reuses_completed_work_on_retry(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+
+    def preprocess(image, *_args):
+        calls.append(int(np.asarray(image)[0, 0, 0]))
+        if len(calls) == 1:
+            module.shared.state.interrupted = True
+        return np.asarray(image)
+
+    monkeypatch.setattr(module, "preprocess_depth_map", preprocess)
+    monkeypatch.setattr(module, "load_control_state_dict", lambda _path: {"ok": True})
+    entries = [
+        {
+            "id": str(value),
+            "source": np.full((5, 7, 3), value, dtype=np.uint8),
+            "name": str(value),
+            "mode": module.DEPTH_MODE,
+            "preprocessor": module.DEPTH_DIRECT,
+            "resolution": 768,
+            "invert": False,
+            "strength": 1.0,
+        }
+        for value in (10, 20)
+    ]
+    interrupted = make_process()
+    interrupted.n_iter = 2
+
+    first = module._prepare_generation_cache(interrupted, entries)
+    assert first["cancelled"] is True
+    assert set(first["processed"]) == {"10"}
+    module._cleanup_control_cache(interrupted)
+
+    module.shared.state.interrupted = False
+    retry = make_process()
+    retry.n_iter = 2
+    second = module._prepare_generation_cache(retry, entries)
+
+    assert second["cancelled"] is False
+    assert set(second["processed"]) == {"10", "20"}
+    assert calls == [10, 20]
+
+
 def test_cache_all_previews_reuses_valid_results(monkeypatch, tmp_path):
     module = load_script(monkeypatch, tmp_path)
     calls = []
@@ -1128,8 +1343,14 @@ def test_cache_all_previews_reuses_valid_results(monkeypatch, tmp_path):
     monkeypatch.setattr(
         module,
         "_preview_entry",
-        lambda *_args, **_kwargs: calls.append(True)
-        or (np.ones((32, 64, 3), dtype=np.uint8), "", 64, 32),
+        lambda entry, *_args, **_kwargs: calls.append(True)
+        or (
+            np.ones((32, 64, 3), dtype=np.uint8),
+            "",
+            64,
+            32,
+            module._preview_signature(entry),
+        ),
     )
 
     _selected, _status, cache = module._cache_all_previews(
