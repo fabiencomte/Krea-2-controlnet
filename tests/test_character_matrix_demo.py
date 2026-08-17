@@ -137,8 +137,12 @@ def test_depth_background_normalization_preserves_dark_subject() -> None:
 
 def test_readme_visual_matrix_stays_near_the_top() -> None:
     readme = (REPO / "README.md").read_text(encoding="utf-8")
-    image = "assets/forge-character-control-matrix.webp"
+    image = (
+        "https://raw.githubusercontent.com/fabiencomte/Krea-2-controlnet/"
+        "forge-classic-2.28.1/assets/forge-character-control-matrix.webp"
+    )
     assert readme.count(image) == 1
+    assert "](assets/forge-character-control-matrix.webp)" not in readme
     section = readme.index("### What changed compared")
     table = readme.index("| Original standalone project", section)
     assert section < readme.index(image) < table
