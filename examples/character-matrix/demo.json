@@ -1,0 +1,396 @@
+{
+  "schema_version": 1,
+  "forge_target": "sd-webui-forge-classic 2.28.1 (Neo)",
+  "alwayson_script": "Krea 2 Depth / Pose ControlNet-LoRA",
+  "generation_defaults": {
+    "steps": 8,
+    "sampler_name": "Euler",
+    "scheduler": "Simple",
+    "cfg_scale": 1.0,
+    "width": 768,
+    "height": 768,
+    "n_iter": 1,
+    "restore_faces": false,
+    "save_images": false,
+    "script_name": null,
+    "script_args": []
+  },
+  "models": [
+    {
+      "role": "checkpoint",
+      "file": "models/Stable-diffusion/pornmasterKrea2_v2TurboInt8.safetensors",
+      "bytes": 14132258325,
+      "sha256": "147bbab4e0c0731d625795e777fff6695092a2b8ff8c024af4c91b190b98240c"
+    },
+    {
+      "role": "vae",
+      "file": "models/VAE/krea2RealVae_v10.safetensors",
+      "bytes": 507591212,
+      "sha256": "0dbbe0baeca04c2b98d2f3809c6f595608939809c88b695ba971368f17c874b8"
+    },
+    {
+      "role": "text_encoder",
+      "file": "models/text_encoder/qwen3VL4BAbliteratedComfyui_v10.safetensors",
+      "bytes": 4831356160,
+      "sha256": "1cc1120f54f04736e4dee3b8b22744637332cb34e645a1e4c51196191861ae9d"
+    },
+    {
+      "role": "pose_control",
+      "file": "models/ControlNet/Krea2/krea2_turbo_openpose_controlnet.safetensors",
+      "bytes": 228587504,
+      "sha256": "0ddc3aafce4abdf7af3309b2f00c1bacdf15df1f2b4fb7adc9ff71795da90ecf"
+    },
+    {
+      "role": "depth_control",
+      "file": "models/ControlNet/Krea2/depth-control-lora.safetensors",
+      "bytes": 861995928,
+      "sha256": "fb80547ed79b47c1e3fea7bb9d36297e3917b2115fab6700ca1501350f9f483c"
+    }
+  ],
+  "sources": {
+    "standing": {
+      "file": "sources/openpose-standing.png",
+      "sha256": "10947d18d0d2bab3ad41e88c99e6448bffd8297eabdceadb88c420525dd927c9",
+      "bytes": 42312,
+      "mode": "Pose / OpenPose",
+      "preprocessor": "None (already an OpenPose map)",
+      "resolution": 768,
+      "invert": false
+    },
+    "dance": {
+      "file": "sources/openpose-dance.png",
+      "sha256": "498535a833ed693905d74c2dfe27f9836d014425247d5d044ae2a1da8558f840",
+      "bytes": 40107,
+      "mode": "Pose / OpenPose",
+      "preprocessor": "None (already an OpenPose map)",
+      "resolution": 768,
+      "invert": false
+    },
+    "jump": {
+      "file": "sources/openpose-jump.png",
+      "sha256": "7525d4b7becee1b398734c11651264ab9e0bdf9ca6c196b0b2d63f5c0dd402b7",
+      "bytes": 38336,
+      "mode": "Pose / OpenPose",
+      "preprocessor": "None (already an OpenPose map)",
+      "resolution": 768,
+      "invert": false
+    },
+    "depth": {
+      "file": "sources/depth-thumbs.webp",
+      "sha256": "b8e305f80a4baccd18e74cc0864bbfa43714cfb74383f995c58120eda45886db",
+      "bytes": 4000,
+      "mode": "Depth",
+      "preprocessor": "None (already a depth map)",
+      "resolution": 768,
+      "invert": false
+    }
+  },
+  "runs": [
+    {
+      "id": "deadpool-standing",
+      "character": "Deadpool",
+      "source_ids": [
+        "standing"
+      ],
+      "prompt": "full-body cinematic studio photograph of the same original red-and-black masked comic anti-hero, fitted tactical bodysuit, expressive white eye lenses, realistic stitched fabric and leather panels, athletic adult man, both hands and both feet fully visible, clean neutral warm-gray seamless backdrop, soft dramatic portrait lighting, sharp professional photography, no franchise emblem, no logo, no weapons",
+      "negative_prompt": "unmasked face, exposed face, exposed hair, exposed skin, woman, dress, white dress, cape, weapons, swords, guns, logo, emblem, text, watermark, cropped limbs, out of frame, extra arms, extra legs, extra hands, extra fingers, fused fingers, duplicate person, two people, deformed anatomy, colored skeleton lines, neon bones, black rectangles",
+      "seed": 913,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "standing": 2
+      }
+    },
+    {
+      "id": "deadpool-dance-jump",
+      "character": "Deadpool",
+      "source_ids": [
+        "dance",
+        "jump"
+      ],
+      "prompt": "full-body cinematic studio photograph of the same original red-and-black masked comic anti-hero performing an expressive dynamic dance pose, fitted tactical bodysuit, expressive white eye lenses, realistic stitched fabric and leather panels, athletic adult man, both hands and both feet fully visible, clean neutral warm-gray seamless backdrop, soft dramatic portrait lighting, sharp professional photography, no franchise emblem, no logo, no weapons",
+      "negative_prompt": "unmasked face, exposed face, exposed hair, exposed skin, woman, dress, white dress, cape, weapons, swords, guns, logo, emblem, text, watermark, cropped limbs, out of frame, extra arms, extra legs, extra hands, extra fingers, fused fingers, duplicate person, two people, deformed anatomy, colored skeleton lines, neon bones, black rectangles",
+      "seed": 1501,
+      "batch_size": 2,
+      "strength": 0.88,
+      "selected_indices": {
+        "dance": 0,
+        "jump": 1
+      }
+    },
+    {
+      "id": "deadpool-depth",
+      "character": "Deadpool",
+      "source_ids": [
+        "depth"
+      ],
+      "prompt": "Deadpool in his canonical red-and-black tactical suit, masked face, waist-up centered portrait, facing camera, both arms visible symmetrically, both hands giving a clear thumbs-up, seamless uniform warm light-gray studio background, exact neutral beige-gray backdrop, flat even background color, no gradient, soft neutral frontal studio lighting, no props, generous equal margins, polished high-quality character render, both hands fully covered by opaque red-and-black full-finger superhero gloves, no exposed skin, exactly one raised thumb on each hand",
+      "negative_prompt": "unequal background, dark background, black background, colored background, scenery, gradient backdrop, spotlight, vignette, cropped hands, missing hand, extra arm, extra hand, extra fingers, malformed fingers, text, watermark, openpose skeleton, colored sticks, bare hands, exposed fingers, fingerless gloves",
+      "seed": 8201,
+      "batch_size": 4,
+      "strength": 0.92,
+      "selected_indices": {
+        "depth": 0
+      }
+    },
+    {
+      "id": "bart-standing",
+      "character": "Bart Simpson",
+      "source_ids": [
+        "standing"
+      ],
+      "prompt": "Faithful Bart Simpson from The Simpsons, canonical yellow ten-year-old cartoon boy, exactly two arms and two hands, one left arm and one right arm only, both attached normally at the shoulders, no additional limbs, nine-point spiky hair silhouette, large round white eyes, orange short-sleeve T-shirt, blue shorts, blue sneakers, four-finger cartoon hands, full body centered, match the supplied OpenPose exactly, high-quality 3D cel-shaded animated film render, thick clean black outlines, seamless uniform warm light-gray studio background, flat even background color, soft neutral lighting, generous margins",
+      "negative_prompt": "third arm, extra arm, extra limb, duplicated arm, detached arm, extra hand, extra fingers, five fingers, realistic adult, muscular body, photorealistic skin, sleeveless shirt, tank top, brown shirt, armor, malformed hands, cropped feet, text, watermark, openpose skeleton, colored sticks, black background",
+      "seed": 8101,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "standing": 3
+      }
+    },
+    {
+      "id": "bart-dance-jump",
+      "character": "Bart Simpson",
+      "source_ids": [
+        "dance",
+        "jump"
+      ],
+      "prompt": "faithful polished 3D animated full-body render of Bart Simpson following an expressive dynamic dance or jumping pose, recognizable yellow cartoon boy with nine pointed spiky hair, large round white eyes, orange short-sleeve t-shirt, blue shorts, white ankle socks and blue sneakers, canonical cartoon proportions and four-finger hands, single character, both hands and both feet fully visible, clean neutral warm-gray studio backdrop, soft cinematic animation lighting, crisp feature-film quality",
+      "negative_prompt": "photorealistic human, adult man, adult woman, realistic skin, brown hair, long hair, beard, five-finger human hands, extra fingers, extra arms, extra legs, duplicate person, cropped limbs, out of frame, text, watermark, logo, colored skeleton lines, black rectangles, deformed face, malformed hands",
+      "seed": 6101,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "dance": 0,
+        "jump": 3
+      }
+    },
+    {
+      "id": "bart-depth",
+      "character": "Bart Simpson",
+      "source_ids": [
+        "depth"
+      ],
+      "prompt": "Faithful Bart Simpson from The Simpsons, canonical yellow ten-year-old cartoon boy, oversized yellow child head, nine-point spiky hair silhouette, large round white eyes, small slim child torso, orange short-sleeve crew-neck T-shirt with both sleeves clearly visible, waist-up centered portrait, facing camera, both arms visible symmetrically, both hands giving a clear thumbs-up, seamless uniform warm light-gray studio background, exact neutral beige-gray backdrop, flat even background color, no gradient, soft neutral frontal studio lighting, no props, generous equal margins, polished high-quality character render, canonical yellow four-finger cartoon hands, each hand has exactly one raised thumb and three rounded folded fingers, thick clean black outlines, refined 3D cel-shaded TV-animation style",
+      "negative_prompt": "unequal background, dark background, black background, colored background, scenery, gradient backdrop, spotlight, vignette, cropped hands, missing hand, extra arm, extra hand, extra fingers, malformed fingers, text, watermark, openpose skeleton, colored sticks, adult body, muscular torso, realistic anatomy, photorealistic skin, tank top, sleeveless shirt, brown shirt, shoulder armor, five fingers, realistic hands, fingernails, long fingers",
+      "seed": 8201,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "depth": 0
+      }
+    },
+    {
+      "id": "black-widow-standing",
+      "character": "Black Widow",
+      "source_ids": [
+        "standing"
+      ],
+      "prompt": "Black Widow, Natasha Romanoff, recognizable adult woman with shoulder-length wavy auburn-red hair, wearing her canonical fitted matte black tactical catsuit from neck to boots, subtle dark charcoal panels and tiny red accents, black utility belt, black wrist gauntlets and black boots, no white fabric, no dress, full body centered, match the supplied OpenPose exactly, cinematic realistic superhero portrait, seamless uniform warm light-gray studio background, flat even backdrop, soft neutral lighting, complete hands and feet inside frame",
+      "negative_prompt": "white suit, white clothing, white dress, white boots, bridal outfit, blonde hair, skirt, cape, extra arm, extra hand, extra leg, extra fingers, cropped feet, text, watermark, openpose skeleton, colored sticks, black background",
+      "seed": 8301,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "standing": 0
+      }
+    },
+    {
+      "id": "black-widow-dance-jump",
+      "character": "Black Widow",
+      "source_ids": [
+        "dance",
+        "jump"
+      ],
+      "prompt": "Black Widow, Natasha Romanoff, recognizable adult woman with shoulder-length wavy auburn-red hair, wearing her canonical fitted matte black tactical catsuit from neck to boots, subtle dark charcoal panels and tiny red accents, black utility belt, black wrist gauntlets and black boots, no white fabric, no dress, full body centered, match the supplied OpenPose exactly, cinematic realistic superhero portrait, seamless uniform warm light-gray studio background, flat even backdrop, soft neutral lighting, complete hands and feet inside frame",
+      "negative_prompt": "white suit, white clothing, white dress, white boots, bridal outfit, blonde hair, skirt, cape, extra arm, extra hand, extra leg, extra fingers, cropped feet, text, watermark, openpose skeleton, colored sticks, black background",
+      "seed": 8401,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "dance": 0,
+        "jump": 1
+      }
+    },
+    {
+      "id": "black-widow-depth",
+      "character": "Black Widow",
+      "source_ids": [
+        "depth"
+      ],
+      "prompt": "Black Widow, Natasha Romanoff, recognizable adult woman with shoulder-length wavy auburn-red hair, waist-up centered portrait, facing camera, both arms visible symmetrically, both hands giving a clear thumbs-up, seamless uniform warm light-gray studio background, exact neutral beige-gray backdrop, flat even background color, no gradient, soft neutral frontal studio lighting, no props, generous equal margins, polished high-quality character render, fitted matte black tactical catsuit with subtle red accents, both hands fully covered by sleek black full-finger tactical gloves, exactly one raised thumb on each hand, cinematic realistic superhero portrait",
+      "negative_prompt": "unequal background, dark background, black background, colored background, scenery, gradient backdrop, spotlight, vignette, cropped hands, missing hand, extra arm, extra hand, extra fingers, malformed fingers, text, watermark, openpose skeleton, colored sticks, bare hands, exposed fingers, fingerless gloves, white dress, blonde hair",
+      "seed": 8201,
+      "batch_size": 4,
+      "strength": 0.92,
+      "selected_indices": {
+        "depth": 0
+      }
+    },
+    {
+      "id": "darth-vader-standing",
+      "character": "Darth Vader",
+      "source_ids": [
+        "standing"
+      ],
+      "prompt": "full-body cinematic studio photograph of Darth Vader in his iconic complete Star Wars black armor, glossy domed helmet with triangular respirator mask and dark eye lenses, ribbed black undersuit, shoulder armor, chest control panel, utility belt, long flowing black cape and armored boots, tall imposing single character, empty black-gloved hands, no lightsaber and no weapon, helmet hands cape and both boots fully inside frame, neutral warm-gray seamless backdrop, balanced rim lighting revealing every black armor detail, premium film still",
+      "negative_prompt": "unmasked face, exposed skin, missing helmet, Kylo Ren, stormtrooper, lightsaber, weapon, red sword, duplicate person, extra arms, extra hands, extra fingers, bare hands, cropped helmet, cropped limbs, text, watermark, malformed armor, colored skeleton lines, black rectangles, pure black background, crushed shadows",
+      "seed": 5701,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "standing": 2
+      }
+    },
+    {
+      "id": "darth-vader-dance-jump",
+      "character": "Darth Vader",
+      "source_ids": [
+        "dance",
+        "jump"
+      ],
+      "prompt": "full-body cinematic studio photograph of Darth Vader following an expressive dynamic dance or jumping pose in his iconic complete Star Wars black armor, glossy domed helmet with triangular respirator mask and dark eye lenses, ribbed black undersuit, shoulder armor, chest control panel, utility belt, long flowing black cape and armored boots, tall imposing single character, empty black-gloved hands, no lightsaber and no weapon, helmet hands cape and both boots fully inside frame, neutral warm-gray seamless backdrop, balanced rim lighting revealing every black armor detail, premium film still",
+      "negative_prompt": "unmasked face, exposed skin, missing helmet, Kylo Ren, stormtrooper, lightsaber, weapon, red sword, duplicate person, extra arms, extra hands, extra fingers, bare hands, cropped helmet, cropped limbs, text, watermark, malformed armor, colored skeleton lines, black rectangles, pure black background, crushed shadows",
+      "seed": 6401,
+      "batch_size": 4,
+      "strength": 0.88,
+      "selected_indices": {
+        "dance": 0,
+        "jump": 3
+      }
+    },
+    {
+      "id": "darth-vader-depth",
+      "character": "Darth Vader",
+      "source_ids": [
+        "depth"
+      ],
+      "prompt": "Darth Vader, canonical glossy black helmet and mask, black armored chest panel and cape, waist-up centered portrait, facing camera, both arms visible symmetrically, both hands giving a clear thumbs-up, seamless uniform warm light-gray studio background, exact neutral beige-gray backdrop, flat even background color, no gradient, soft neutral frontal studio lighting, no props, generous equal margins, polished high-quality character render, both hands fully covered by black armored full-finger gloves, exactly one raised thumb on each hand, cinematic realistic Star Wars character portrait",
+      "negative_prompt": "unequal background, dark background, black background, colored background, scenery, gradient backdrop, spotlight, vignette, cropped hands, missing hand, extra arm, extra hand, extra fingers, malformed fingers, text, watermark, openpose skeleton, colored sticks, bare hands, exposed skin, white gloves, unmasked face",
+      "seed": 8201,
+      "batch_size": 4,
+      "strength": 0.92,
+      "selected_indices": {
+        "depth": 0
+      }
+    }
+  ],
+  "matrix": {
+    "columns": [
+      "Control input",
+      "Deadpool",
+      "Bart Simpson",
+      "Black Widow",
+      "Darth Vader"
+    ],
+    "rows": [
+      {
+        "id": "standing",
+        "label": "OPENPOSE / STANDING",
+        "source_id": "standing",
+        "outputs": [
+          {
+            "run": "deadpool-standing",
+            "index": 2
+          },
+          {
+            "run": "bart-standing",
+            "index": 3
+          },
+          {
+            "run": "black-widow-standing",
+            "index": 0
+          },
+          {
+            "run": "darth-vader-standing",
+            "index": 2
+          }
+        ]
+      },
+      {
+        "id": "dance",
+        "label": "OPENPOSE / DANCE",
+        "source_id": "dance",
+        "outputs": [
+          {
+            "run": "deadpool-dance-jump",
+            "index": 0
+          },
+          {
+            "run": "bart-dance-jump",
+            "index": 0
+          },
+          {
+            "run": "black-widow-dance-jump",
+            "index": 0
+          },
+          {
+            "run": "darth-vader-dance-jump",
+            "index": 0
+          }
+        ]
+      },
+      {
+        "id": "jump",
+        "label": "OPENPOSE / JUMP",
+        "source_id": "jump",
+        "outputs": [
+          {
+            "run": "deadpool-dance-jump",
+            "index": 1
+          },
+          {
+            "run": "bart-dance-jump",
+            "index": 3
+          },
+          {
+            "run": "black-widow-dance-jump",
+            "index": 1
+          },
+          {
+            "run": "darth-vader-dance-jump",
+            "index": 3
+          }
+        ]
+      },
+      {
+        "id": "depth",
+        "label": "DEPTH / THUMBS UP",
+        "source_id": "depth",
+        "outputs": [
+          {
+            "run": "deadpool-depth",
+            "index": 0
+          },
+          {
+            "run": "bart-depth",
+            "index": 0
+          },
+          {
+            "run": "black-widow-depth",
+            "index": 0
+          },
+          {
+            "run": "darth-vader-depth",
+            "index": 0
+          }
+        ]
+      }
+    ]
+  },
+  "notes": [
+    "Exactly three unique OpenPose source files are included; none is duplicated.",
+    "The raw Depth portraits share seed 8201, prompt structure and framing; the montage normalizes only their presentation backgrounds.",
+    "Character names and designs remain the property of their respective rights holders.",
+    "No character reference image is used by the API or included in this kit."
+  ],
+  "presentation": {
+    "depth_background_rgb": [
+      163,
+      160,
+      146
+    ],
+    "operation": "scripts/image_ops.py:normalize_depth_background",
+    "raw_outputs_modified": false
+  }
+}

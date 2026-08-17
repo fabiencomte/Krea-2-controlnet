@@ -266,6 +266,25 @@ limit is distinct from source-map leakage, which the cached K/V path removes.
   every output passed literal-copy and metadata gates;
 - Ruff, `compileall`, `git diff --check`, UI load and API infotext metadata.
 
+### Visual examples
+
+The matrix below uses each of the three supplied OpenPose maps exactly once
+(`standing_13.png`, `dance_05.png` and `jumping_05.png`), plus the supplied
+thumbs-up Depth map once. Every character subject is a real Forge output from
+the extension. Pose panels are unretouched apart from resizing; for a coherent
+comparison, the four Depth presentation backgrounds are normalized by the
+documented deterministic montage script while the raw API PNGs stay unchanged.
+
+![Three unique OpenPose inputs and one Depth input beside Deadpool, Bart Simpson, Black Widow and Darth Vader outputs](assets/forge-character-control-matrix.webp)
+
+The selected outputs passed the pre-registered anti-copy and metadata gates.
+Black Widow uses her black tactical suit. The four Depth portraits deliberately
+share the same neutral studio background, seed family and framing.
+
+The complete reproduction kit — exact prompts, negative prompts, seeds, grouped
+batch selections, source controls, model hashes, generator, validator and composer —
+is available in [examples/character-matrix](examples/character-matrix/README.md).
+
 Run the tests from this repository:
 
 ```bash
