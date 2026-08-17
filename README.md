@@ -22,6 +22,25 @@ Python 3.13, Gradio 4.40 and a Krea 2 checkpoint using the Qwen/Krea image VAE.
 
 ### What changed compared with the original project
 
+### Visual examples
+
+The matrix below uses each of the three supplied OpenPose maps exactly once
+(`standing_13.png`, `dance_05.png` and `jumping_05.png`), plus the supplied
+thumbs-up Depth map once. Every character subject is a real Forge output from
+the extension. Pose panels are unretouched apart from resizing; for a coherent
+comparison, the four Depth presentation backgrounds are normalized by the
+documented deterministic montage script while the raw API PNGs stay unchanged.
+
+![Three unique OpenPose inputs and one Depth input beside Deadpool, Bart Simpson, Black Widow and Darth Vader outputs](assets/forge-character-control-matrix.webp)
+
+The selected outputs passed the pre-registered anti-copy and metadata gates.
+Black Widow uses her black tactical suit. The four Depth portraits deliberately
+share the same neutral studio background, seed family and framing.
+
+The complete reproduction kit — exact prompts, negative prompts, seeds, grouped
+batch selections, source controls, model hashes, generator, validator and composer —
+is available in [examples/character-matrix](examples/character-matrix/README.md).
+
 | Original standalone project | This Forge Classic fork |
 | --- | --- |
 | Command-line Depth inference and training utilities | Native txt2img/img2img always-on panel using Forge's generation lifecycle |
@@ -265,25 +284,6 @@ limit is distinct from source-map leakage, which the cached K/V path removes.
   sparse squirrel used additional original-versus-mirror discrimination, and
   every output passed literal-copy and metadata gates;
 - Ruff, `compileall`, `git diff --check`, UI load and API infotext metadata.
-
-### Visual examples
-
-The matrix below uses each of the three supplied OpenPose maps exactly once
-(`standing_13.png`, `dance_05.png` and `jumping_05.png`), plus the supplied
-thumbs-up Depth map once. Every character subject is a real Forge output from
-the extension. Pose panels are unretouched apart from resizing; for a coherent
-comparison, the four Depth presentation backgrounds are normalized by the
-documented deterministic montage script while the raw API PNGs stay unchanged.
-
-![Three unique OpenPose inputs and one Depth input beside Deadpool, Bart Simpson, Black Widow and Darth Vader outputs](assets/forge-character-control-matrix.webp)
-
-The selected outputs passed the pre-registered anti-copy and metadata gates.
-Black Widow uses her black tactical suit. The four Depth portraits deliberately
-share the same neutral studio background, seed family and framing.
-
-The complete reproduction kit — exact prompts, negative prompts, seeds, grouped
-batch selections, source controls, model hashes, generator, validator and composer —
-is available in [examples/character-matrix](examples/character-matrix/README.md).
 
 Run the tests from this repository:
 

@@ -133,3 +133,14 @@ def test_depth_background_normalization_preserves_dark_subject() -> None:
     )
     assert tuple(normalized[0, 0]) == (163, 160, 146)
     assert np.abs(normalized[70, 64].astype(int) - (25, 25, 25)).max() <= 1
+
+
+def test_readme_visual_matrix_stays_near_the_top() -> None:
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    image = "assets/forge-character-control-matrix.webp"
+    assert readme.count(image) == 1
+    section = readme.index("### What changed compared")
+    table = readme.index("| Original standalone project", section)
+    assert section < readme.index(image) < table
+    image_line = readme[: readme.index(image)].count("\n") + 1
+    assert image_line <= 35
