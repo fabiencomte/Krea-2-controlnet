@@ -234,6 +234,16 @@ limit is distinct from source-map leakage, which the cached K/V path removes.
   per-image visual conditioning, isolated t=0 K/V caching and reset, independent
   Wan-VAE image batching, DWPose body/hand/face
   rendering, and cleanup after an interrupt-like exception;
+- real cache validation on the tracked robot, Depth, OpenPose and character-matrix
+  fixtures at preprocessor resolutions 512 and 768. Depth Anything V2 and DWPose
+  cold/warm outputs were pixel-identical; A/B/A over two cycles ran only the two
+  unique DWPose inferences, and same-path file replacement missed then reused the
+  original result when its original pixels were restored;
+- two consecutive real Forge API generations for each estimator reported
+  `0 hit(s), 1 miss(es)` then `1 hit(s), 0 miss(es)` in generation metadata.
+  With identical image, prompt and seed, both Depth and DWPose output pairs were
+  pixel-identical. On the validation machine, Depth took 19.01 s then 3.75 s and
+  DWPose took 7.54 s then 5.81 s end-to-end;
 - release-candidate end-to-end matrix in Forge/Gradio 4.40 with four ordered
   entries: photo→Depth Anything V2, photo→DWPose, supplied Depth map and
   supplied OpenPose map. `Cache all previews` produced four 128×128 previews,
@@ -296,9 +306,26 @@ Run the tests from this repository:
 
 ```bash
 python -m pytest -q tests
-python -m ruff check forge_krea2_depth scripts tests install.py
-python -m compileall -q forge_krea2_depth scripts tests install.py
+python -m ruff check forge_krea2_depth scripts tests tools install.py
+python -m compileall -q forge_krea2_depth scripts tests tools install.py
 ```
+
+Run the opt-in validation against the repository's real image fixtures and
+locally installed Depth Anything V2 / DWPose models:
+
+```bash
+python tools/validate_cache_images.py --artifacts-dir cache-image-results --resolution 512
+python tools/validate_cache_images.py --artifacts-dir cache-image-results-768 --resolution 768
+```
+
+For complete generation-level verification, start Forge with `--api`, then run:
+
+```bash
+python tools/validate_cache_api.py --artifacts-dir cache-api-results
+```
+
+The API harness makes two Depth and two DWPose generations and requires explicit
+miss→hit metadata, pixel-identical pairs and a faster warm run for both modes.
 
 ### API example
 

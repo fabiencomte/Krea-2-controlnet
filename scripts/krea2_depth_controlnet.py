@@ -546,7 +546,9 @@ def _create_control_map(
     return np.ascontiguousarray(fit_control_map(source, width, height))
 
 
-def _preprocess_control_map(mode, image, preprocessor, resolution, invert):
+def _preprocess_control_map(
+    mode, image, preprocessor, resolution, invert, _return_hit=False
+):
     """Reuse raw Depth/DWPose maps across previews and Generate clicks."""
 
     source, source_digest = prepare_control_source(image)
@@ -569,8 +571,8 @@ def _preprocess_control_map(mode, image, preprocessor, resolution, invert):
             )
         return preprocess_depth_map(source, preprocessor, resolution, invert)
 
-    result, _hit = _CONTROL_MAP_CACHE.get_or_compute(key, compute)
-    return result
+    result, hit = _CONTROL_MAP_CACHE.get_or_compute(key, compute)
+    return (result, hit) if _return_hit else result
 
 
 def _clear_preprocessor_cache() -> None:
@@ -984,6 +986,8 @@ def _prepare_generation_cache(process, entries):
     final_width, final_height = _requested_final_dimensions(process)
     processed = {}
     previews = {}
+    preprocessor_hits = 0
+    preprocessor_misses = 0
     cancelled = False
     for index in sorted(scheduled):
         if bool(getattr(shared.state, "interrupted", False)) or bool(
@@ -994,13 +998,16 @@ def _prepare_generation_cache(process, entries):
         entry = entries[index]
         if entry["strength"] == 0:
             continue
-        result = _preprocess_control_map(
+        result, cache_hit = _preprocess_control_map(
             entry["mode"],
             entry["source"],
             entry["preprocessor"],
             entry["resolution"],
             entry["invert"],
+            _return_hit=True,
         )
+        preprocessor_hits += int(cache_hit)
+        preprocessor_misses += int(not cache_hit)
         processed[entry["id"]] = result
         previews[entry["id"]] = fit_control_map(result, final_width, final_height)
         _publish_active_control_preview(
@@ -1036,6 +1043,8 @@ def _prepare_generation_cache(process, entries):
         "previews": previews,
         "adapter_states": adapter_states,
         "final_dimensions": (final_width, final_height),
+        "preprocessor_hits": preprocessor_hits,
+        "preprocessor_misses": preprocessor_misses,
         "cancelled": cancelled,
     }
     first = [entries[index] for index in groups[0]] if groups else []
@@ -1545,12 +1554,16 @@ class Krea2DepthControlScript(scripts.ScriptBuiltinUI):
                 final_width,
                 final_height,
             )
-            _prepare_generation_cache(p, entries)
+            cache = _prepare_generation_cache(p, entries)
             p.extra_generation_params.update(
                 {
                     "Krea 2 Control Files": len(entries),
                     "Krea 2 Control Sequence": "A, B, C, A…",
                     "Krea 2 Per-file Settings": True,
+                    "Krea 2 Preprocessor Cache": (
+                        f"{cache['preprocessor_hits']} hit(s), "
+                        f"{cache['preprocessor_misses']} miss(es)"
+                    ),
                 }
             )
         except Exception as exc:

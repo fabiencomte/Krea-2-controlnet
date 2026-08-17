@@ -449,6 +449,9 @@ def test_valid_api_values_apply_control_without_touching_forge_state(
     assert calls.applied[0][3] == 0.75
     assert process.sd_model.forge_objects.unet == "controlled-unet"
     assert process.extra_generation_params["Krea 2 Depth Strength"] == 0.75
+    assert process.extra_generation_params["Krea 2 Preprocessor Cache"] == (
+        "0 hit(s), 1 miss(es)"
+    )
     assert not calls.guarded
 
 
@@ -484,6 +487,9 @@ def test_multiple_images_alternate_inside_and_across_batches(
     assert calls.applied[0][1][0] == 2
     assert process.extra_generation_params["Krea 2 Control Files"] == 3
     assert process.extra_generation_params["Krea 2 Control Sequence"] == "A, B, C, A…"
+    assert process.extra_generation_params["Krea 2 Preprocessor Cache"] == (
+        "0 hit(s), 3 miss(es)"
+    )
 
 
 def test_ratio_warning_does_not_block_generation(monkeypatch, tmp_path):
@@ -950,14 +956,18 @@ def test_preprocessor_cache_survives_generation_cleanup(monkeypatch, tmp_path):
     }
 
     first = make_process()
-    module._prepare_generation_cache(first, [entry])
+    first_cache = module._prepare_generation_cache(first, [entry])
     module._cleanup_control_cache(first)
     second = make_process()
-    module._prepare_generation_cache(second, [entry])
+    second_cache = module._prepare_generation_cache(second, [entry])
 
     assert len(calls) == 1
     assert module._preprocessor_cache_info()["hits"] == 1
-    assert second._krea2_control_cache["processed"]["same-entry"].shape == (4, 8, 3)
+    assert first_cache["preprocessor_hits"] == 0
+    assert first_cache["preprocessor_misses"] == 1
+    assert second_cache["preprocessor_hits"] == 1
+    assert second_cache["preprocessor_misses"] == 0
+    assert second_cache["processed"]["same-entry"].shape == (4, 8, 3)
 
 
 def test_preview_primes_the_generation_preprocessor_cache(monkeypatch, tmp_path):
