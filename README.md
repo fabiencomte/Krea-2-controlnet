@@ -31,7 +31,7 @@ the extension. Pose panels are unretouched apart from resizing; for a coherent
 comparison, the four Depth presentation backgrounds are normalized by the
 documented deterministic montage script while the raw API PNGs stay unchanged.
 
-![Three unique OpenPose inputs and one Depth input beside Deadpool, Bart Simpson, Black Widow and Darth Vader outputs](https://raw.githubusercontent.com/fabiencomte/Krea-2-controlnet/forge-classic-2.28.1/assets/forge-character-control-matrix.webp)
+![Three unique OpenPose inputs and one Depth input beside Deadpool, Bart Simpson, Black Widow and Darth Vader outputs](https://github.com/fabiencomte/Krea-2-controlnet/releases/download/readme-assets-v1/forge-character-control-matrix.webp)
 
 The selected outputs passed the pre-registered anti-copy and metadata gates.
 Black Widow uses her black tactical suit. The four Depth portraits deliberately
