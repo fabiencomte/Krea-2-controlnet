@@ -209,17 +209,22 @@ limit is distinct from source-map leakage, which the cached K/V path removes.
   DWPose pose/detector weights use `724f4ff2439ed61afb86fb8a1951ec39c6220682803b4a8bd4f598cd913b1843`
   and `7860ae79de6c89a3c1eb72ae9a2756c0ccfbe04b7791bb5880afabd97855a411`.
   A valid local file is reused; a corrupt file is replaced.
-- Depth preprocesses each source once, then refits the cached raw map to every
-  sampling pass's real dimensions. Pose also preprocesses once and reuses the
-  same uncropped, final-resolution letterboxed structure for both Hires passes.
+- Depth and DWPose preprocessing is cached persistently by decoded image pixels
+  and preprocessing settings, so previews, duplicate files, sequences and later
+  Generate clicks reuse the same raw map. A changed image or setting gets a new
+  result automatically. The thread-safe LRU keeps at most 128 maps / 256 MiB,
+  while per-generation cleanup still releases its process-local references and
+  sampling state. Raw maps are refitted to each sampling pass's real dimensions,
+  including Hires.
 
 ### Verified cases
 
-- 101 automated tests: official checkpoint layout, completeness and logical GGUF
+- Automated tests cover official checkpoint layout, completeness and logical GGUF
   tensor shapes, on-the-fly GGUF patching, full projection weight/bias, CFG
   batch repetition, per-file list editing/reordering/removal, conservative
-  Depth/OpenPose/photo detection, mixed-mode batch validation, generation and
-  preview cache reuse, duplicate files, interruption cleanup, multi-image
+  Depth/OpenPose/photo detection, mixed-mode batch validation, persistent
+  generation/preview cache reuse, same-path image changes, bounded LRU cleanup,
+  duplicate files, concurrent requests, interruption cleanup, multi-image
   alternation, centered black letterboxing,
   non-square and changed-ratio Hires dimensions, preview/API contracts,
   previous-wrapper multi-call composition, one-shot Krea Edit behavior,

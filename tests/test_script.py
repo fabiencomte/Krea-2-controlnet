@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -803,7 +804,7 @@ def test_per_file_edit_select_reorder_remove_and_cache_invalidation(
     ]
     cache = {
         entries[1]["id"]: {
-            "signature": (module.DEPTH_MODE, "depth_anything_v2", 768, False),
+            "signature": module._preview_signature(entries[1]),
             "image": np.ones((2, 2, 3), dtype=np.uint8),
         }
     }
@@ -923,6 +924,192 @@ def test_generation_cache_reuses_duplicate_processing_and_cleans_after_generatio
     assert cache["previews"]["id-0"].shape == (32, 64, 3)
     module.Krea2DepthControlScript().postprocess(process, None)
     assert not hasattr(process, "_krea2_control_cache")
+
+
+def test_preprocessor_cache_survives_generation_cleanup(monkeypatch, tmp_path):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+    source = np.full((5, 7, 3), 42, dtype=np.uint8)
+    monkeypatch.setattr(
+        module,
+        "preprocess_depth_map",
+        lambda *_args: calls.append(True)
+        or np.full((4, 8, 3), 90, dtype=np.uint8),
+    )
+    monkeypatch.setattr(module, "load_control_state_dict", lambda _path: {"ok": True})
+    entry = {
+        "id": "same-entry",
+        "source": source,
+        "name": "same image",
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+        "strength": 1.0,
+    }
+
+    first = make_process()
+    module._prepare_generation_cache(first, [entry])
+    module._cleanup_control_cache(first)
+    second = make_process()
+    module._prepare_generation_cache(second, [entry])
+
+    assert len(calls) == 1
+    assert module._preprocessor_cache_info()["hits"] == 1
+    assert second._krea2_control_cache["processed"]["same-entry"].shape == (4, 8, 3)
+
+
+def test_preview_primes_the_generation_preprocessor_cache(monkeypatch, tmp_path):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "preprocess_depth_map",
+        lambda *_args: calls.append(True)
+        or np.full((4, 8, 3), 90, dtype=np.uint8),
+    )
+    monkeypatch.setattr(module, "load_control_state_dict", lambda _path: {"ok": True})
+    entry = {
+        "id": "previewed",
+        "source": np.full((5, 7, 3), 42, dtype=np.uint8),
+        "name": "previewed image",
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+        "strength": 1.0,
+    }
+
+    preview, _warning, _width, _height = module._preview_entry(entry, 64, 32)
+    process = make_process()
+    cache = module._prepare_generation_cache(process, [entry])
+
+    assert preview.shape == (32, 64, 3)
+    assert cache["previews"]["previewed"].shape == (32, 64, 3)
+    assert len(calls) == 1
+
+
+def test_changed_pixels_or_settings_do_not_reuse_stale_preprocessing(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "preprocess_depth_map",
+        lambda image, _preprocessor, resolution, invert: calls.append(
+            (int(np.asarray(image)[0, 0, 0]), resolution, invert)
+        )
+        or np.full((4, 8, 3), len(calls), dtype=np.uint8),
+    )
+    monkeypatch.setattr(module, "load_control_state_dict", lambda _path: {"ok": True})
+
+    def entry(pixels, resolution=768, invert=False):
+        return {
+            "id": "stable-id",
+            "source": np.full((5, 7, 3), pixels, dtype=np.uint8),
+            "name": "changing image",
+            "mode": module.DEPTH_MODE,
+            "preprocessor": module.DEPTH_DIRECT,
+            "resolution": resolution,
+            "invert": invert,
+            "strength": 1.0,
+        }
+
+    for item in (entry(1), entry(2), entry(2, 1024), entry(2, 1024, True)):
+        module._prepare_generation_cache(make_process(), [item])
+
+    assert calls == [(1, 768, False), (2, 768, False), (2, 1024, False), (2, 1024, True)]
+
+
+def test_file_rewritten_at_same_path_invalidates_preview_signature(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    path = tmp_path / "control.png"
+    Image.fromarray(np.zeros((3, 4, 3), dtype=np.uint8)).save(path)
+    entry = {
+        "id": "file",
+        "source": str(path),
+        "mode": module.DEPTH_MODE,
+        "preprocessor": module.DEPTH_DIRECT,
+        "resolution": 768,
+        "invert": False,
+    }
+    cache = {
+        "file": {
+            "signature": module._preview_signature(entry),
+            "image": np.ones((2, 2, 3), dtype=np.uint8),
+        }
+    }
+
+    Image.fromarray(np.full((3, 4, 3), 255, dtype=np.uint8)).save(path)
+
+    assert module._cache_for_entry(cache, entry) is None
+
+
+def test_pose_preprocessor_cache_survives_generate_cleanup(monkeypatch, tmp_path):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "preprocess_pose_map",
+        lambda *_args: calls.append(True)
+        or np.full((6, 4, 3), 120, dtype=np.uint8),
+    )
+    monkeypatch.setattr(module, "load_pose_state_dict", lambda _path: {"pose": True})
+    entry = {
+        "id": "pose",
+        "source": np.full((8, 5, 3), 33, dtype=np.uint8),
+        "name": "pose photo",
+        "mode": module.POSE_MODE,
+        "preprocessor": module.DWPOSE,
+        "resolution": 768,
+        "invert": False,
+        "strength": 1.0,
+    }
+
+    first = make_process()
+    module._prepare_generation_cache(first, [entry])
+    module._cleanup_control_cache(first)
+    module._prepare_generation_cache(make_process(), [entry])
+
+    assert len(calls) == 1
+
+
+def test_sequence_cache_reuses_content_duplicates_and_next_generate(
+    monkeypatch, tmp_path
+):
+    module = load_script(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "preprocess_depth_map",
+        lambda image, *_args: calls.append(int(np.asarray(image)[0, 0, 0]))
+        or np.asarray(image),
+    )
+    monkeypatch.setattr(module, "load_control_state_dict", lambda _path: {"ok": True})
+
+    def entry(entry_id, value):
+        return {
+            "id": entry_id,
+            "source": np.full((5, 7, 3), value, dtype=np.uint8),
+            "name": entry_id,
+            "mode": module.DEPTH_MODE,
+            "preprocessor": module.DEPTH_DIRECT,
+            "resolution": 768,
+            "invert": False,
+            "strength": 1.0,
+        }
+
+    entries = [entry("A", 10), entry("B", 20), entry("A-copy", 10)]
+    for _ in range(2):
+        process = make_process()
+        process.n_iter = 3
+        module._prepare_generation_cache(process, entries)
+        module._cleanup_control_cache(process)
+
+    assert calls == [10, 20]
 
 
 def test_cache_all_previews_reuses_valid_results(monkeypatch, tmp_path):

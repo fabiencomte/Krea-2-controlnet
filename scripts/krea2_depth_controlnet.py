@@ -35,7 +35,6 @@ from forge_krea2_depth.detection import (
 )
 from forge_krea2_depth.images import (
     alternating_image_indices,
-    create_depth_map,
     fit_control_map,
     generation_dimensions,
     normalize_images,
@@ -47,7 +46,6 @@ from forge_krea2_depth.pose import (
     DWPOSE_FILES,
     apply_pose_control,
     build_pose_prompt_conditioning,
-    create_pose_map,
     download_dwpose_models,
     download_pose_model,
     dwpose_model_dir,
@@ -55,6 +53,11 @@ from forge_krea2_depth.pose import (
     load_pose_state_dict,
     pose_model_path,
     preprocess_pose_map,
+)
+from forge_krea2_depth.preprocessor_cache import (
+    ControlMapCache,
+    build_control_map_cache_key,
+    source_fingerprint,
 )
 from modules import paths, scripts, shared
 from modules.ui_components import InputAccordion
@@ -78,6 +81,7 @@ ENTRY_TABLE_HEADERS = [
     "Mode",
     "Settings",
 ]
+_CONTROL_MAP_CACHE = ControlMapCache()
 
 
 def _entry_input_summary(entry) -> str:
@@ -257,6 +261,7 @@ def _entry_status(entries, selected_index=-1, message="") -> str:
 
 def _preview_signature(entry):
     return (
+        source_fingerprint(entry["source"]),
         entry["mode"],
         entry["preprocessor"],
         entry["resolution"],
@@ -531,18 +536,43 @@ def _mode_ui(mode):
 def _create_control_map(
     mode, image, preprocessor, resolution, width, height, invert
 ):
-    if mode == POSE_MODE:
-        return create_pose_map(
-            image,
-            preprocessor,
-            resolution,
-            width,
-            height,
-            paths.models_path,
-        )
-    return create_depth_map(
-        image, preprocessor, resolution, width, height, invert
+    source = _preprocess_control_map(
+        mode, image, preprocessor, resolution, invert
     )
+    return np.ascontiguousarray(fit_control_map(source, width, height))
+
+
+def _preprocess_control_map(mode, image, preprocessor, resolution, invert):
+    """Reuse raw Depth/DWPose maps across previews and Generate clicks."""
+
+    key = build_control_map_cache_key(
+        image,
+        mode,
+        preprocessor,
+        resolution,
+        invert if mode == DEPTH_MODE else False,
+    )
+
+    def compute():
+        if mode == POSE_MODE:
+            return preprocess_pose_map(
+                image,
+                preprocessor,
+                resolution,
+                paths.models_path,
+            )
+        return preprocess_depth_map(image, preprocessor, resolution, invert)
+
+    result, _hit = _CONTROL_MAP_CACHE.get_or_compute(key, compute)
+    return result
+
+
+def _clear_preprocessor_cache() -> None:
+    _CONTROL_MAP_CACHE.clear(reset_stats=True)
+
+
+def _preprocessor_cache_info() -> dict[str, int]:
+    return _CONTROL_MAP_CACHE.info()
 
 
 def _preview(
@@ -758,6 +788,9 @@ def _download_models(entries, selected_mode):
         if needs_dwpose or not records:
             dwpose = download_dwpose_models(paths.models_path)
             lines.append(f"DWPose: `{dwpose[0].parent}` — 2/2 verified")
+    # A verified replacement at the same path can change preprocessing output.
+    # Do not retain maps produced by the previous model files.
+    _clear_preprocessor_cache()
     return "  \n".join(lines)
 
 
@@ -913,7 +946,6 @@ def _prepare_generation_cache(process, entries):
     final_width, final_height = _requested_final_dimensions(process)
     processed = {}
     previews = {}
-    reused = {}
     cancelled = False
     for index in sorted(scheduled):
         if bool(getattr(shared.state, "interrupted", False)) or bool(
@@ -924,31 +956,13 @@ def _prepare_generation_cache(process, entries):
         entry = entries[index]
         if entry["strength"] == 0:
             continue
-        signature_source = entry["source"] if isinstance(entry["source"], str) else entry["id"]
-        signature = (
-            signature_source,
+        result = _preprocess_control_map(
             entry["mode"],
+            entry["source"],
             entry["preprocessor"],
             entry["resolution"],
             entry["invert"],
         )
-        result = reused.get(signature)
-        if result is None:
-            if entry["mode"] == POSE_MODE:
-                result = preprocess_pose_map(
-                    entry["source"],
-                    entry["preprocessor"],
-                    entry["resolution"],
-                    paths.models_path,
-                )
-            else:
-                result = preprocess_depth_map(
-                    entry["source"],
-                    entry["preprocessor"],
-                    entry["resolution"],
-                    entry["invert"],
-                )
-            reused[signature] = result
         processed[entry["id"]] = result
         previews[entry["id"]] = fit_control_map(result, final_width, final_height)
         _publish_active_control_preview(
