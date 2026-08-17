@@ -89,6 +89,12 @@ files have different modes or strengths. A simultaneous batch is accepted only
 when every active row in that batch has the same mode and strength; incompatible
 lists fail early with an actionable message.
 
+The pinned official Pose workflow enables `kv_cache`. The extension therefore
+computes each clean OpenPose reference once at `t=0`, then appends only its
+cached attention keys and values to live denoising. Source pixels are never
+inserted as live queries, which prevents the coloured skeleton and its black
+canvas from being copied into the generated image.
+
 The source selector is an ordered list. Adding several files preserves their
 selection order and selects the newest row. Click a row to show its source,
 preview and private settings; **Move up**, **Move down**, **Remove selected** and
@@ -127,7 +133,10 @@ strength; Pose generally works best around `0.8–1.0`. Forge CFG stays separate
 DWPose is designed for people. Occlusion, cropped limbs, very small subjects or
 non-human anatomy can produce incomplete keypoints; inspect the preview before
 generating. A Pose reference also adds image tokens, so high-resolution Hires
-jobs use more VRAM than plain Krea generation.
+jobs use more VRAM than plain Krea generation. Hires remains more compositionally
+variable than a direct 512×512 Pose run and can invent duplicate anatomy; start
+at 512×512, keep Hires denoising modest and inspect the result. This sampling
+limit is distinct from source-map leakage, which the cached K/V path removes.
 
 ### List behaviour and edge cases
 
@@ -163,8 +172,9 @@ jobs use more VRAM than plain Krea generation.
   incompatible checkpoint is rejected instead of being applied silently.
 - Pose verifies all 256 rank-32 LoRA layers, encodes Qwen vision at no more than
   `384×384` total pixels, limits the VAE reference to 1 MP, and reproduces the
-  trained `Picture 1` + `index_timestep_zero` contract. Each batch item keeps
-  its own visual embedding and clean reference latent.
+  trained `Picture 1` + `index_timestep_zero` + `kv_cache` contract. Each batch
+  item is VAE-encoded independently and keeps its own visual embedding, clean
+  reference latent and isolated t=0 attention K/V.
 - GGUF checkpoints use Forge's required on-the-fly LoRA path, so deltas are
   applied to dequantised logical weights instead of compressed byte storage.
 - A control error installs a fail-closed sampling guard. Forge cannot quietly
@@ -186,7 +196,7 @@ jobs use more VRAM than plain Krea generation.
 
 ### Verified cases
 
-- 93 automated tests: official checkpoint layout, completeness and logical GGUF
+- 101 automated tests: official checkpoint layout, completeness and logical GGUF
   tensor shapes, on-the-fly GGUF patching, full projection weight/bias, CFG
   batch repetition, per-file list editing/reordering/removal, conservative
   Depth/OpenPose/photo detection, mixed-mode batch validation, generation and
@@ -195,7 +205,8 @@ jobs use more VRAM than plain Krea generation.
   non-square and changed-ratio Hires dimensions, preview/API contracts,
   previous-wrapper multi-call composition, one-shot Krea Edit behavior,
   low-VRAM dtype casts, strict controls, pinned local/download integrity, Pose
-  per-image visual conditioning, t=0 reference modulation, DWPose body/hand/face
+  per-image visual conditioning, isolated t=0 K/V caching and reset, independent
+  Wan-VAE image batching, DWPose body/hand/face
   rendering, and cleanup after an interrupt-like exception;
 - release-candidate end-to-end matrix in Forge/Gradio 4.40 with four ordered
   entries: photo→Depth Anything V2, photo→DWPose, supplied Depth map and
@@ -238,6 +249,21 @@ jobs use more VRAM than plain Krea generation.
   paths; Pose `0.85` versus `0.25` produced a 104.27 mean absolute pixel change;
 - Skip during batch 1/2, continuation and successful batch 2/2;
 - Interrupt during sampling followed by a clean controlled generation;
+- regression campaign with the supplied `dance_05.png`, `jumping_05.png`
+  and `standing_13.png`: all three skeletons were detected as OpenPose at
+  93%; the old live-token path visibly copied coloured limbs and black blocks,
+  while the cached K/V path kept spatial source-colour matches below 0.71% and
+  black-background copies below 0.86% on every output;
+- the corrected two-image batches preserved `dance+jump` and `jump+dance`
+  attribution instead of broadcasting the first reference: every batch output
+  was pixel-identical to its matching single-reference run and stayed
+  21.78-27.56 MAE away from the wrong reference;
+- Depth runtime matrix over the supplied thumbs-up map plus the squirrel and
+  dragon-relief maps: 15/15 controlled-versus-disabled comparisons passed over
+  seeds 101, 102, 303, 404 and the pre-registered holdout 707. Dense-map
+  correlation was 0.662-0.888 with gains of 0.389-0.686 over disabled; the
+  sparse squirrel used additional original-versus-mirror discrimination, and
+  every output passed literal-copy and metadata gates;
 - Ruff, `compileall`, `git diff --check`, UI load and API infotext metadata.
 
 Run the tests from this repository:

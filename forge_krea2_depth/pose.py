@@ -1,11 +1,13 @@
 """Krea 2 Pose reference conditioning and verified DWPose preprocessing.
 
 The pose adapter was trained with ai-toolkit's Krea 2 edit/reference path, not
-with the expanded depth input projection.  Pose references are consequently
-appended as clean (t=0) image tokens and the adapter is applied as an ordinary
-Krea LoRA on a generation-local Forge ``UnetPatcher`` clone.
+with the expanded depth input projection. Its official workflow enables the
+Ostris ``kv_cache`` path: each clean reference is evaluated once at t=0, then
+only its cached attention keys and values are appended to live denoising. The
+adapter is applied as an ordinary Krea LoRA on a generation-local Forge
+``UnetPatcher`` clone.
 
-The index-timestep-zero reference path is adapted from Ostris' MIT-licensed
+The cached-reference path is adapted from Ostris' MIT-licensed
 ComfyUI-Krea2-Ostris-Edit. See ``THIRD_PARTY_NOTICES.md``.
 """
 
@@ -213,9 +215,7 @@ def load_dwpose_detector(models_path: str | os.PathLike[str]):
         pose_path, detector_path = verify_dwpose_models(models_path)
     except (FileNotFoundError, ValueError):
         pose_path, detector_path = download_dwpose_models(models_path)
-    return _dwpose_detector_cached(
-        str(detector_path), str(pose_path), _dwpose_device()
-    )
+    return _dwpose_detector_cached(str(detector_path), str(pose_path), _dwpose_device())
 
 
 def _format_dwpose(candidates, scores, width: int, height: int) -> dict[str, Any]:
@@ -291,17 +291,37 @@ def _fit_area(samples: torch.Tensor, max_pixels: int, snap: int = 1) -> torch.Te
 
 
 @torch.inference_mode()
-def encode_pose_references(engine, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def encode_pose_references(
+    engine, images: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Encode BHWC pose maps using the exact ai-toolkit/Ostris size contract."""
 
     samples = images.movedim(-1, 1)
     vision = _fit_area(samples, VLM_MAX_PIXELS).movedim(1, -1)[..., :3]
     refs = _fit_area(samples, REF_LATENT_MAX_PIXELS, REF_SNAP)
-    encoded = engine.forge_objects.vae.encode(refs.movedim(1, -1)[..., :3])
-    latent = engine.forge_objects.vae.first_stage_model.process_in(encoded)
-    if latent.ndim == 5 and latent.shape[2] == 1:
-        latent = latent[:, :, 0]
-    return vision, latent
+    vae = engine.forge_objects.vae
+    latent_items = []
+    for ref in refs:
+        # Krea 2 uses a Wan-style VAE. Forge therefore interprets a BHWC batch
+        # as temporal frames of one sample; encode every pose independently so
+        # one reference cannot silently replace the others in a real batch.
+        encoded = vae.encode(ref.unsqueeze(0).movedim(1, -1)[..., :3])
+        latent = vae.first_stage_model.process_in(encoded)
+        if latent.ndim == 5:
+            if latent.shape[2] != 1:
+                raise RuntimeError(
+                    "Pose reference VAE produced multiple temporal frames for one image"
+                )
+            latent = latent[:, :, 0]
+        if latent.ndim != 4 or latent.shape[0] != 1:
+            raise RuntimeError(
+                "Pose reference VAE must return one BCHW latent per input image"
+            )
+        latent_items.append(latent)
+
+    if not latent_items:
+        raise ValueError("At least one pose reference image is required")
+    return vision, torch.cat(latent_items, dim=0)
 
 
 class _PoseTextModel:
@@ -422,58 +442,137 @@ def _pack_refs(dit, ref_latents, batch: int, device, dtype):
                 pw=patch,
             )
         )
-        ids = torch.zeros(
-            ref_height, ref_width, 3, device=device, dtype=torch.float32
-        )
+        ids = torch.zeros(ref_height, ref_width, 3, device=device, dtype=torch.float32)
         ids[..., 0] = index + 1.0
         ids[..., 1] = torch.arange(ref_height, device=device)[:, None]
         ids[..., 2] = torch.arange(ref_width, device=device)[None, :]
-        positions.append(
-            ids.reshape(1, ref_height * ref_width, 3).repeat(batch, 1, 1)
-        )
+        positions.append(ids.reshape(1, ref_height * ref_width, 3).repeat(batch, 1, 1))
     return torch.cat(tokens, dim=1), torch.cat(positions, dim=1)
 
 
-def _block_ref_forward(
-    block, value, real_vector, zero_vector, split, frequencies, transformer_options
+def _attention_with_pose_kv(
+    attn,
+    value: torch.Tensor,
+    frequencies,
+    *,
+    kv_capture=None,
+    kv_cache=None,
+    transformer_options=None,
 ):
-    real = block.mod(real_vector)
-    zero = block.mod(zero_vector)
+    """Run Krea attention while capturing or appending isolated Pose K/V."""
 
-    def mod(hidden, scale: int, shift: int):
-        return torch.cat(
-            (
-                (1 + real[scale]) * hidden[:, :split] + real[shift],
-                (1 + zero[scale]) * hidden[:, split:] + zero[shift],
-            ),
-            dim=1,
-        )
+    from backend.attention import attention_function
+    from backend.quant_ops import ck
 
-    def gate(hidden, index: int):
-        return torch.cat(
-            (real[index] * hidden[:, :split], zero[index] * hidden[:, split:]),
-            dim=1,
-        )
-
-    value = value + gate(
-        block.attn(
-            mod(block.prenorm(value), 0, 1),
-            frequencies,
-            None,
-            transformer_options=transformer_options,
-        ),
-        2,
+    query, key, value_projection, gate = (
+        attn.wq(value),
+        attn.wk(value),
+        attn.wv(value),
+        attn.gate(value),
     )
-    value = value + gate(block.mlp(mod(block.postnorm(value), 3, 4)), 5)
+    query = rearrange(query, "B L (H D) -> B H L D", H=attn.heads)
+    key = rearrange(key, "B L (H D) -> B H L D", H=attn.kvheads)
+    value_projection = rearrange(
+        value_projection, "B L (H D) -> B H L D", H=attn.kvheads
+    )
+    query, key = attn.qknorm(query, key)
+    if frequencies is not None:
+        query, key = ck.apply_rope(query, key, frequencies)
+    if kv_capture is not None:
+        kv_capture.append((key, value_projection))
+    if kv_cache is not None:
+        cached_key, cached_value = kv_cache
+        key = torch.cat((key, cached_key.to(device=key.device, dtype=key.dtype)), dim=2)
+        value_projection = torch.cat(
+            (
+                value_projection,
+                cached_value.to(
+                    device=value_projection.device, dtype=value_projection.dtype
+                ),
+            ),
+            dim=2,
+        )
+    if attn.kvheads != attn.heads:
+        repeats = attn.heads // attn.kvheads
+        key = key.repeat_interleave(repeats, dim=1)
+        value_projection = value_projection.repeat_interleave(repeats, dim=1)
+    output = attention_function(
+        query,
+        key,
+        value_projection,
+        attn.heads,
+        mask=None,
+        skip_reshape=True,
+        transformer_options=transformer_options or {},
+    )
+    return attn.wo(output * F.sigmoid(gate))
+
+
+def _block_with_pose_kv(
+    block,
+    value,
+    vector,
+    frequencies,
+    *,
+    kv_capture=None,
+    kv_cache=None,
+    transformer_options=None,
+):
+    prescale, preshift, pregate, postscale, postshift, postgate = block.mod(vector)
+    attention_input = (1 + prescale) * block.prenorm(value) + preshift
+    value = value + pregate * _attention_with_pose_kv(
+        block.attn,
+        attention_input,
+        frequencies,
+        kv_capture=kv_capture,
+        kv_cache=kv_cache,
+        transformer_options=transformer_options,
+    )
+    value = value + postgate * block.mlp(
+        (1 + postscale) * block.postnorm(value) + postshift
+    )
     return value
 
 
-def _forward_with_pose_refs(
-    dit, x, timesteps, context, ref_latents, transformer_options
-):
-    """Forge port of Ostris' ai-toolkit-compatible index-timestep-zero path."""
+def _precompute_pose_ref_kv(dit, sample, timesteps, ref_latents, transformer_options):
+    """Precompute the t=0 reference K/V expected by the official Pose workflow."""
 
     from backend.nn.flux import timestep_embedding
+
+    batch = sample.shape[0] * (sample.shape[2] if sample.ndim == 5 else 1)
+    reference_tokens, reference_positions = _pack_refs(
+        dit, ref_latents, batch, sample.device, sample.dtype
+    )
+    hidden = dit.first(reference_tokens)
+    zero_time = dit.tmlp(
+        timestep_embedding(torch.zeros_like(timesteps), dit.tdim)
+        .unsqueeze(1)
+        .to(hidden.dtype)
+    )
+    zero_vector = dit.tproj(zero_time)
+    frequencies = dit.pe_embedder(reference_positions)
+    cached = []
+    for block in dit.blocks:
+        captured = []
+        hidden = _block_with_pose_kv(
+            block,
+            hidden,
+            zero_vector,
+            frequencies,
+            kv_capture=captured,
+            transformer_options=transformer_options,
+        )
+        cached.append(captured[0])
+    return cached
+
+
+def _forward_with_cached_pose_refs(
+    dit, x, timesteps, context, ref_kv, transformer_options
+):
+    """Denoise text/image queries against isolated cached Pose reference K/V."""
+
+    from backend.nn.flux import timestep_embedding
+
     if x.ndim == 5:
         if x.shape[2] != 1:
             raise RuntimeError("Krea 2 Pose control supports image generation only.")
@@ -483,37 +582,23 @@ def _forward_with_pose_refs(
     x = _pad_to_patch(x, patch)
     height, width = x.shape[-2:]
     grid_height, grid_width = height // patch, width // patch
-    image = rearrange(
-        x,
-        "b c (h ph) (w pw) -> b (h w) (c ph pw)",
-        ph=patch,
-        pw=patch,
+    image = dit.first(
+        rearrange(
+            x,
+            "b c (h ph) (w pw) -> b (h w) (c ph pw)",
+            ph=patch,
+            pw=patch,
+        )
     )
-    refs, ref_positions = _pack_refs(
-        dit, ref_latents, batch, x.device, x.dtype
-    )
-    reference_length = refs.shape[1]
-    image = dit.first(torch.cat((image, refs), dim=1))
-
     time = dit.tmlp(
         timestep_embedding(timesteps, dit.tdim).unsqueeze(1).to(image.dtype)
     )
     time_vector = dit.tproj(time)
-    zero_time = dit.tmlp(
-        timestep_embedding(torch.zeros_like(timesteps), dit.tdim)
-        .unsqueeze(1)
-        .to(image.dtype)
-    )
-    zero_vector = dit.tproj(zero_time)
-
-    context = dit.txtfusion(
-        context, mask=None, transformer_options=transformer_options
-    )
+    context = dit.txtfusion(context, mask=None, transformer_options=transformer_options)
     context = dit.txtmlp(context)
     text_length = context.shape[1]
     image_length = image.shape[1]
     combined = torch.cat((context, image), dim=1)
-    split = text_length + image_length - reference_length
 
     text_positions = torch.zeros(
         batch, text_length, 3, device=x.device, dtype=torch.float32
@@ -523,25 +608,26 @@ def _forward_with_pose_refs(
     )
     image_ids[..., 1] = torch.arange(grid_height, device=x.device)[:, None]
     image_ids[..., 2] = torch.arange(grid_width, device=x.device)[None, :]
-    image_positions = image_ids.reshape(
-        1, grid_height * grid_width, 3
-    ).repeat(batch, 1, 1)
-    frequencies = dit.pe_embedder(
-        torch.cat((text_positions, image_positions, ref_positions), dim=1)
+    image_positions = image_ids.reshape(1, grid_height * grid_width, 3).repeat(
+        batch, 1, 1
     )
-
-    for block in dit.blocks:
-        combined = _block_ref_forward(
+    frequencies = dit.pe_embedder(torch.cat((text_positions, image_positions), dim=1))
+    if len(ref_kv) != len(dit.blocks):
+        raise RuntimeError(
+            f"Krea 2 Pose K/V cache has {len(ref_kv)} blocks; "
+            f"expected {len(dit.blocks)}."
+        )
+    for block, cached in zip(dit.blocks, ref_kv):
+        combined = _block_with_pose_kv(
             block,
             combined,
             time_vector,
-            zero_vector,
-            split,
             frequencies,
-            transformer_options,
+            kv_cache=cached,
+            transformer_options=transformer_options,
         )
     final = dit.last(combined, time)
-    output = final[:, text_length:split]
+    output = final[:, text_length : text_length + image_length]
     output = rearrange(
         output,
         "b (h w) (c ph pw) -> b c (h ph) (w pw)",
@@ -559,7 +645,9 @@ def build_pose_lora_patches(state_dict, model) -> dict[str, Any]:
 
     key_map = model_lora_keys_unet(model, {})
     patches, remaining = load_lora(dict(state_dict), key_map)
-    tensor_remaining = [key for key, value in remaining.items() if torch.is_tensor(value)]
+    tensor_remaining = [
+        key for key, value in remaining.items() if torch.is_tensor(value)
+    ]
     if len(patches) != POSE_EXPECTED_LAYERS or tensor_remaining:
         detail = ", ".join(tensor_remaining[:4])
         raise ValueError(
@@ -593,6 +681,7 @@ def apply_pose_control(unet, ref_latent, state_dict, strength: float):
         )
 
     refs = [ref_latent.detach()]
+    cache_state = {"last_sigma": None, "caches": {}}
 
     def pose_forward(
         x,
@@ -603,13 +692,27 @@ def apply_pose_control(unet, ref_latent, state_dict, strength: float):
         **kwargs,
     ):
         del attention_mask, kwargs
-        return _forward_with_pose_refs(
+        options = transformer_options or {}
+        sigma = float(timesteps.detach().float().max().cpu())
+        previous_sigma = cache_state["last_sigma"]
+        if previous_sigma is not None and sigma > previous_sigma:
+            cache_state["caches"].clear()
+        cache_state["last_sigma"] = sigma
+        batch = x.shape[0] * (x.shape[2] if x.ndim == 5 else 1)
+        key = (batch, x.device.type, x.device.index, x.dtype)
+        reference_kv = cache_state["caches"].get(key)
+        if reference_kv is None:
+            reference_kv = _precompute_pose_ref_kv(
+                diffusion, x, timesteps, refs, options
+            )
+            cache_state["caches"][key] = reference_kv
+        return _forward_with_cached_pose_refs(
             diffusion,
             x,
             timesteps,
             context,
-            refs,
-            transformer_options or {},
+            reference_kv,
+            options,
         )
 
     new_unet.add_object_patch("diffusion_model.forward", pose_forward)

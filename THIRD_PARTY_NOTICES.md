@@ -2,9 +2,9 @@
 
 ## ComfyUI-Krea2-Ostris-Edit
 
-The Krea 2 Pose reference-token and per-span timestep implementation in
+The Krea 2 Pose reference-token, t=0 and cached-attention K/V implementation in
 `forge_krea2_depth/pose.py` is adapted from
-[ComfyUI-Krea2-Ostris-Edit](https://github.com/ostris/ComfyUI-Krea2-Ostris-Edit).
+[ComfyUI-Krea2-Ostris-Edit commit 7756566](https://github.com/ostris/ComfyUI-Krea2-Ostris-Edit/commit/7756566160c4a1b24bb1bd9f0ff3ced1a83d7547).
 
 MIT License
 
